@@ -1,0 +1,24 @@
+#
+# Docs-derived example config: OpenAPI backend using the docker-compose
+# petstore service exposed on the host at :8082.
+#
+
+adapter:
+  bind: 127.0.0.1:19082
+  logLevel: info
+
+imports: []
+
+servers:
+  petstore:
+    type: openapi
+    spec: http://127.0.0.1:8082/api/v3/openapi.json
+    baseUrl: http://127.0.0.1:8082/api/v3
+    autoDiscover:
+      include:
+        - "GET /store/inventory"
+        - "GET /pet/{petId}"
+      exclude:
+        - "DELETE *"
+
+

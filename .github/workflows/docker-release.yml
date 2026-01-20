@@ -1,0 +1,184 @@
+name: reusable-docker-release
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: "Full image name, e.g. ghcr.io/<owner>/mcp-adapter"
+        required: true
+        type: string
+      dockerfile:
+        description: "Path to Dockerfile"
+        required: true
+        type: string
+      context:
+        description: "Docker build context directory"
+        required: true
+        type: string
+      cargo_pkg:
+        description: "Cargo package to build in --release"
+        required: true
+        type: string
+      binary_name:
+        description: "Binary name under target/release/"
+        required: true
+        type: string
+      tag_prefix:
+        description: "Tag prefix to strip to derive version (e.g. adapter-v)"
+        required: true
+        type: string
+      rust_toolchain:
+        description: "Rust toolchain version"
+        required: false
+        default: "1.92.0"
+        type: string
+      docker_target:
+        description: "Optional Dockerfile target (multi-stage). If empty, builds the default final stage."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: rust (fmt, clippy, test, release build)
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release_meta.outputs.version }}
+      stable: ${{ steps.release_meta.outputs.stable }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Release guard (tag version must match Cargo.toml)
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prefix="${{ inputs.tag_prefix }}"
+          pkg="${{ inputs.cargo_pkg }}"
+
+          if [[ "${tag}" != "${prefix}"* ]]; then
+            echo "Unexpected tag '${tag}'. Expected prefix '${prefix}'."
+            exit 1
+          fi
+
+          version="${tag#${prefix}}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+          # Stable releases are plain X.Y.Z. Pre-releases should include a hyphen.
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "stable=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "stable=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+          if ! cargo_version="$(
+            cargo metadata --no-deps --format-version=1 \
+              | jq -er --arg pkg "${pkg}" '[.packages[] | select(.name == $pkg) | .version][0]'
+          )"; then
+            echo "Failed to read version for cargo package '${pkg}' from cargo metadata."
+            exit 1
+          fi
+
+          if [[ "${version}" != "${cargo_version}" ]]; then
+            echo "Release guard failed:"
+            echo "  tag version:    ${version}"
+            echo "  Cargo.toml version (via cargo metadata for '${pkg}'): ${cargo_version}"
+            echo ""
+            echo "Fix by updating crates for '${pkg}' to version ${version}, or retag with ${prefix}${cargo_version}."
+            exit 1
+          fi
+
+      - name: Format (rustfmt)
+        run: cargo fmt --all -- --check
+
+      - name: Lint (clippy)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-targets
+
+      - name: Build release binary
+        run: cargo build --release -p "${{ inputs.cargo_pkg }}"
+
+      - name: Upload release binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.binary_name }}-${{ inputs.docker_target || 'default' }}-${{ github.sha }}
+          path: target/release/${{ inputs.binary_name }}
+          if-no-files-found: error
+
+  docker:
+    name: docker (build + push ghcr)
+    runs-on: ubuntu-latest
+    needs: rust
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ inputs.image_name }}
+          tags: |
+            type=raw,value=${{ needs.rust.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.rust.outputs.stable == 'true' }}
+            type=sha,format=short
+
+      - name: Build and push
+        if: ${{ inputs.docker_target == '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (target)
+        if: ${{ inputs.docker_target != '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.docker_target }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,101 @@
+name: release
+
+on:
+  push:
+    tags:
+      # Monorepo release tags. Convention: <component>-vX.Y.Z (and prereleases like -rc.N)
+      - "*-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  mcp_adapter:
+    # Adapter releases: adapter-vX.Y.Z
+    if: startsWith(github.ref, 'refs/tags/adapter-v')
+    uses: ./.github/workflows/docker-release.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      image_name: ghcr.io/${{ github.repository_owner }}/mcp-adapter
+      dockerfile: ./Dockerfile
+      context: .
+      cargo_pkg: unrelated-mcp-adapter
+      binary_name: unrelated-mcp-adapter
+      tag_prefix: adapter-v
+
+  mcp_gateway:
+    # Gateway releases: gateway-vX.Y.Z
+    if: startsWith(github.ref, 'refs/tags/gateway-v')
+    uses: ./.github/workflows/docker-release.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      image_name: ghcr.io/${{ github.repository_owner }}/mcp-gateway
+      dockerfile: ./Dockerfile
+      context: .
+      cargo_pkg: unrelated-mcp-gateway
+      binary_name: unrelated-mcp-gateway
+      tag_prefix: gateway-v
+      docker_target: gateway-runtime
+
+  mcp_gateway_migrator:
+    # Gateway migrator releases: gateway-vX.Y.Z (must match gateway version)
+    if: startsWith(github.ref, 'refs/tags/gateway-v')
+    uses: ./.github/workflows/docker-release.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      image_name: ghcr.io/${{ github.repository_owner }}/mcp-gateway-migrator
+      dockerfile: ./Dockerfile
+      context: .
+      cargo_pkg: unrelated-mcp-gateway
+      binary_name: unrelated-mcp-gateway
+      tag_prefix: gateway-v
+      docker_target: gateway-migrator
+
+  gateway_cli_binaries:
+    # Gateway CLI release assets: gateway-vX.Y.Z
+    if: startsWith(github.ref, 'refs/tags/gateway-v')
+    uses: ./.github/workflows/binary-release.yml
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      cargo_pkg: unrelated-gateway-admin
+      binary_name: unrelated-gateway-admin
+      tag_prefix: gateway-v
+      target: x86_64-unknown-linux-musl
+
+  mcp_adapter_binaries:
+    # Adapter release assets: adapter-vX.Y.Z
+    if: startsWith(github.ref, 'refs/tags/adapter-v')
+    uses: ./.github/workflows/binary-release.yml
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      cargo_pkg: unrelated-mcp-adapter
+      binary_name: unrelated-mcp-adapter
+      tag_prefix: adapter-v
+      target: x86_64-unknown-linux-musl
+
+  mcp_gateway_ui:
+    # Web UI releases: ui-vX.Y.Z
+    if: startsWith(github.ref, 'refs/tags/ui-v')
+    uses: ./.github/workflows/ui-docker-release.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      image_name: ghcr.io/${{ github.repository_owner }}/mcp-gateway-ui
+      dockerfile: ./ui/Dockerfile
+      context: ./ui
+      tag_prefix: ui-v

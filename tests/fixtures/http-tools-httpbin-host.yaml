@@ -1,0 +1,36 @@
+#
+# Docs-derived example config: manual HTTP tool DSL pointing at the
+# docker-compose httpbin service exposed on the host at :8081.
+#
+
+adapter:
+  bind: 127.0.0.1:19081
+  logLevel: info
+
+imports: []
+
+servers:
+  httpbin:
+    type: http
+    baseUrl: http://127.0.0.1:8081
+    tools:
+      echo_request:
+        method: POST
+        path: /anything/{id}
+        description: Echo a test request and return JSON describing what the server received (path, query, headers, and JSON body).
+        params:
+          id:
+            in: path
+            required: true
+            schema:
+              type: string
+          q:
+            in: query
+            schema:
+              type: string
+          body:
+            in: body
+            schema:
+              type: object
+
+

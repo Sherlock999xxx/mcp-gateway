@@ -1,0 +1,26 @@
+imports: []
+servers:
+  httpbin:
+    type: http
+    baseUrl: http://httpbin:80
+    tools:
+      echo_request:
+        method: POST
+        path: /anything/{id}
+        description: Echo a test request and return JSON describing what the server received (path, query, headers, and JSON body).
+        params:
+          id:
+            in: path
+            required: true
+            schema:
+              type: string
+          q:
+            in: query
+            schema:
+              type: string
+          body:
+            in: body
+            schema:
+              type: object
+
+

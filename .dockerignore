@@ -1,0 +1,20 @@
+# Deny-by-default: keep the Docker build context minimal and avoid
+# accidentally baking local files (configs, fixtures, editor files, etc.).
+**
+
+# --- Allow list (what the current Dockerfile needs) ---
+!.dockerignore
+!Dockerfile
+!Cargo.toml
+!Cargo.lock
+!crates/
+!crates/**
+
+# --- Defense-in-depth: never include these even under allowed paths ---
+**/target/
+**/*.log
+**/.env
+**/.env.*
+**/*~
+**/*.swp
+**/*.swo

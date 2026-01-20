@@ -1,0 +1,25 @@
+openapi: 3.0.3
+info:
+  title: Community Mini API
+  version: 0.0.1
+
+servers:
+  - url: http://example.invalid
+
+paths:
+  /ping:
+    get:
+      operationId: ping
+      summary: Ping
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+

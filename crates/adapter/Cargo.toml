@@ -1,0 +1,57 @@
+[package]
+name = "unrelated-mcp-adapter"
+version = "0.9.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Expose stdio-based MCP servers over streamable HTTP"
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# MCP Protocol - Official Rust SDK
+rmcp = { version = "0.12.0", features = ["client", "transport-child-process", "transport-streamable-http-server", "elicitation"] }
+tokio = { version = "1", features = ["full", "signal"] }
+tokio-util = "0.7"
+axum = { version = "0.8", features = ["macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# Utilities
+thiserror = "2"
+anyhow = "1"
+futures = "0.3"
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+atty = "0.2"
+async-trait = "0.1"
+
+# OpenAPI support
+serde_yaml = "0.9"
+sha2 = "0.10"
+hex = "0.4"
+unrelated-http-tools = { path = "../http-tools" }
+unrelated-openapi-tools = { path = "../openapi-tools" }
+unrelated-tool-transforms = { path = "../tool-transforms" }
+
+[dev-dependencies]
+tempfile = "3"
+testcontainers = "0.26.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+unrelated-test-support = { path = "../test-support" }
+
+[[bin]]
+name = "unrelated-mcp-adapter"
+path = "src/main.rs"
+
+[[bin]]
+name = "unrelated-mcp-stdio-test-server"
+path = "src/bin/stdio_test_server.rs"
+
+[[bin]]
+name = "unrelated-mcp-stdio-list-changed-test-server"
+path = "src/bin/stdio_list_changed_test_server.rs"

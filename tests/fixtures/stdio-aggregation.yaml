@@ -1,0 +1,16 @@
+imports: []
+servers:
+  everything_a:
+    type: stdio
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-everything"
+  everything_b:
+    type: stdio
+    command: npx
+    args:
+      - -y
+      - "@modelcontextprotocol/server-everything"
+
+

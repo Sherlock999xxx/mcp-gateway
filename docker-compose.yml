@@ -1,0 +1,215 @@
+services:
+  gateway_db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: gateway
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d gateway"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      # NOTE: this volume name is intentionally unique so onboarding starts from a clean slate.
+      - gateway_db_data_bootstrap_v1:/var/lib/postgresql/data
+
+  # Optional helper: wipe the DB so the Gateway has zero tenants (for onboarding testing).
+  #
+  # Usage:
+  # - docker compose run --rm gateway_db_reset
+  # - docker compose up -d
+  gateway_db_reset:
+    image: postgres:16-alpine
+    # Never start during `docker compose up` / `make up`.
+    # This is a manual maintenance helper only.
+    profiles: ["manual"]
+    depends_on:
+      gateway_db:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      PGPASSWORD: postgres
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        echo "Dropping schema public (this deletes ALL tenants/config)..."
+        psql -h gateway_db -U postgres -d gateway -v ON_ERROR_STOP=1 \
+          -c "drop schema public cascade; create schema public;"
+
+  gateway_db_migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gateway-migrator
+    image: unrelated-mcp-gateway-migrator:local
+    depends_on:
+      gateway_db:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@gateway_db:5432/gateway?sslmode=disable
+    command:
+      - up
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: gateway-runtime
+    image: unrelated-mcp-gateway:local
+    depends_on:
+      gateway_db:
+        condition: service_healthy
+      gateway_db_migrate:
+        condition: service_completed_successfully
+      adapter_http_tools:
+        condition: service_started
+      adapter_openapi:
+        condition: service_started
+      adapter_stdio_aggregation:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "27100:4000" # data plane
+      - "27101:4001" # admin/control plane
+    environment:
+      UNRELATED_GATEWAY_BIND: 0.0.0.0:4000
+      UNRELATED_GATEWAY_ADMIN_BIND: 0.0.0.0:4001
+      UNRELATED_GATEWAY_DATABASE_URL: postgres://postgres:postgres@gateway_db:5432/gateway?sslmode=disable
+      UNRELATED_GATEWAY_ADMIN_TOKEN: dev-admin-token
+      UNRELATED_GATEWAY_SESSION_SECRET: dev-session-secret
+      # Fresh-install bootstrap endpoint (create first tenant) is enabled only when:
+      # - this flag is true AND
+      # - there are no tenants in the DB.
+      UNRELATED_GATEWAY_BOOTSTRAP_ENABLED: "1"
+      # Mode 3 tenant secret encryption keyring (dev only; override in your shell/env for real deployments).
+      UNRELATED_GATEWAY_SECRET_KEYS: ${UNRELATED_GATEWAY_SECRET_KEYS:-dev-secret-keys}
+      # Outbound HTTP safety (SSRF hardening):
+      # By default, the Gateway blocks private network destinations for gateway-native HTTP/OpenAPI tool sources.
+      # If you want to point a tenant tool source at docker-compose services (e.g. `http://petstore:8080/...`),
+      # opt in explicitly by setting this to "1" in your environment:
+      # UNRELATED_GATEWAY_OUTBOUND_ALLOW_PRIVATE_NETWORKS: ${UNRELATED_GATEWAY_OUTBOUND_ALLOW_PRIVATE_NETWORKS:-0}
+    healthcheck:
+      # `gateway-runtime` is alpine (busybox), so `wget` is available.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4001/health >/dev/null || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+
+  gateway_ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+      args:
+        UI_VERSION: ${UI_VERSION:-dev}
+    image: unrelated-mcp-gateway-ui:local
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "27102:3000"
+    environment:
+      # UI server -> Gateway admin/control plane (internal docker network).
+      GATEWAY_ADMIN_BASE: http://gateway:4001
+      # Optional (not used by the scaffold yet): enable "admin mode" in the UI later.
+      GATEWAY_ADMIN_TOKEN: dev-admin-token
+
+      # What end-users copy into their MCP client config (host network).
+      NEXT_PUBLIC_GATEWAY_DATA_BASE: http://localhost:27100
+
+  httpbin:
+    image: kennethreitz/httpbin
+    restart: unless-stopped
+    ports:
+      - "8081:80"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command:
+      - gunicorn
+      - -b
+      - 0.0.0.0:80
+      - httpbin:app
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+
+  petstore:
+    image: swaggerapi/petstore3
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+
+  adapter_http_tools:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: unrelated-mcp-adapter:local
+    depends_on:
+      - httpbin
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      UNRELATED_CONFIG: /config/config.yaml
+      UNRELATED_BIND: 0.0.0.0:8080
+      UNRELATED_LOG: info
+    volumes:
+      - ./tests/fixtures/http-tools-httpbin.yaml:/config/config.yaml:ro
+
+  adapter_openapi:
+    image: unrelated-mcp-adapter:local
+    depends_on:
+      - petstore
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    environment:
+      UNRELATED_CONFIG: /config/config.yaml
+      UNRELATED_BIND: 0.0.0.0:8080
+      UNRELATED_LOG: info
+      UNRELATED_STARTUP_TIMEOUT: "180"
+    volumes:
+      - ./tests/fixtures/openapi-petstore3.yaml:/config/config.yaml:ro
+
+  adapter_stdio_aggregation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: stdio-node
+    image: unrelated-mcp-adapter:stdio-node
+    restart: unless-stopped
+    ports:
+      - "8084:8080"
+    environment:
+      UNRELATED_CONFIG: /config/config.yaml
+      UNRELATED_BIND: 0.0.0.0:8080
+      UNRELATED_LOG: info
+      UNRELATED_STARTUP_TIMEOUT: "180"
+    volumes:
+      - ./tests/fixtures/stdio-aggregation.yaml:/config/config.yaml:ro
+
+  # Smoke test: a fresh stdio MCP server proxied via the Adapter.
+  adapter_stdio_smoke:
+    image: unrelated-mcp-adapter:stdio-node
+    restart: unless-stopped
+    ports:
+      - "8085:8080"
+    environment:
+      UNRELATED_CONFIG: /config/config.yaml
+      UNRELATED_BIND: 0.0.0.0:8080
+      UNRELATED_LOG: info
+      UNRELATED_STARTUP_TIMEOUT: "180"
+    volumes:
+      - ./tests/fixtures/stdio-smoke.yaml:/config/config.yaml:ro
+
+volumes:
+  gateway_db_data_bootstrap_v1:

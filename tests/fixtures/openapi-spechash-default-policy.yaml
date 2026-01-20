@@ -1,0 +1,22 @@
+#
+# Docs-derived example config: validates specHash + default specHashPolicy behavior.
+#
+# This config sets an intentionally wrong specHash and omits specHashPolicy so you
+# can observe runtime behavior (default is expected to WARN on mismatch and continue).
+#
+
+adapter:
+  bind: 127.0.0.1:19084
+  logLevel: info
+  openapiProbe: false
+
+imports: []
+
+servers:
+  mini:
+    type: openapi
+    spec: ./tests/fixtures/openapi-mini-spec.yaml
+    autoDiscover: true
+    specHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+

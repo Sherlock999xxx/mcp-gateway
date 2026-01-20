@@ -1,0 +1,14 @@
+#
+# Docs-derived example config: minimal adapter with no backends.
+# Used to validate /health, /ready, /status, /map behavior when servers:{}.
+#
+
+adapter:
+  bind: 127.0.0.1:19080
+  logLevel: info
+
+imports: []
+
+servers: {}
+
+

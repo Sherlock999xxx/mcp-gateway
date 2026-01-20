@@ -1,0 +1,21 @@
+#
+# Docs-derived example config: extension/custom HTTP method token.
+# Expected: tool generation succeeds, but upstream may reject the method (e.g. 405).
+#
+
+adapter:
+  bind: 127.0.0.1:19085
+  logLevel: info
+
+imports: []
+
+servers:
+  httpbin:
+    type: http
+    baseUrl: http://127.0.0.1:8081
+    tools:
+      bad_method:
+        method: NOPE
+        path: /anything
+
+

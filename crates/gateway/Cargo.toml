@@ -1,0 +1,54 @@
+[package]
+name = "unrelated-mcp-gateway"
+version = "0.8.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MCP Gateway (planned): authn/z + tenancy + policy + transforms"
+
+[dependencies]
+tokio = { version = "1", features = ["full", "signal"] }
+tokio-util = "0.7"
+axum = { version = "0.8", features = ["macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+anyhow = "1"
+atty = "0.2"
+async-trait = "0.1"
+futures = "0.3"
+rmcp = { version = "0.12.0", features = ["client", "transport-streamable-http-client-reqwest", "elicitation"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+jsonwebtoken = "9"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+sse-stream = "0.2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid"] }
+parking_lot = "0.12"
+unrelated-http-tools = { path = "../http-tools" }
+unrelated-openapi-tools = { path = "../openapi-tools" }
+unrelated-tool-transforms = { path = "../tool-transforms" }
+rusty_paseto = "0.9.0"
+time = { version = "0.3", features = ["formatting"] }
+jsonschema = "0.38.1"
+strsim = "0.11.1"
+chacha20poly1305 = "0.10.1"
+rand_core = { version = "0.9.3", features = ["os_rng"] }
+zeroize = "1.8.2"
+
+[[bin]]
+name = "unrelated-mcp-gateway"
+path = "src/main.rs"
+
+[dev-dependencies]
+rsa = { version = "0.9.10", features = ["pem"] }
+tempfile = "3"
+testcontainers = "0.26.3"
+unrelated-test-support = { path = "../test-support" }

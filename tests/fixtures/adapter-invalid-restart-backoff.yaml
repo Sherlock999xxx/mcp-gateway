@@ -1,0 +1,17 @@
+#
+# Docs-derived example config: intentionally invalid restartBackoff.
+# Docs state validation: minMs <= maxMs, otherwise startup fails.
+#
+
+adapter:
+  bind: 127.0.0.1:19086
+  logLevel: info
+  restartBackoff:
+    minMs: 5000
+    maxMs: 1000
+
+imports: []
+
+servers: {}
+
+

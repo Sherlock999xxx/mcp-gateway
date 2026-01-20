@@ -1,0 +1,10 @@
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/adapter"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92.0"
+license = "MIT"
+repository = "https://github.com/unrelated-ai/mcp-gateway"

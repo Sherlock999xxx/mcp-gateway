@@ -1,0 +1,41 @@
+export function formatDataPlaneAuthMode(mode: string | undefined | null): string {
+  if (!mode) return "(unknown)";
+  switch (mode) {
+    case "disabled":
+      return "No auth";
+    case "apiKeyInitializeOnly":
+      return "API key (init only)";
+    case "apiKeyEveryRequest":
+      return "API key (every request)";
+    case "jwtEveryRequest":
+      return "JWT (every request)";
+    default:
+      return mode;
+  }
+}
+
+export function authModeTone(mode: string | undefined | null): "violet" | "amber" | "zinc" {
+  if (!mode) return "zinc";
+  if (mode.startsWith("apiKey")) return "violet";
+  if (mode.startsWith("jwt")) return "amber";
+  if (mode === "disabled") return "zinc";
+  return "zinc";
+}
+
+export function formatUnix(unix: number): string {
+  return new Date(unix * 1000).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+export function formatUnixRelative(unix: number | null): string {
+  if (!unix) return "never";
+  const diff = Date.now() - unix * 1000;
+  const hours = Math.floor(diff / 3600000);
+  if (hours < 1) return "just now";
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}

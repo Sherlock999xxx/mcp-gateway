@@ -1,0 +1,136 @@
+name: reusable-binary-release
+
+on:
+  workflow_call:
+    inputs:
+      cargo_pkg:
+        description: "Cargo package to build in --release"
+        required: true
+        type: string
+      binary_name:
+        description: "Binary name under target/<triple>/release/"
+        required: true
+        type: string
+      tag_prefix:
+        description: "Tag prefix to strip to derive version (e.g. adapter-v)"
+        required: true
+        type: string
+      target:
+        description: "Rust target triple to build"
+        required: false
+        default: "x86_64-unknown-linux-musl"
+        type: string
+      rust_toolchain:
+        description: "Rust toolchain version"
+        required: false
+        default: "1.92.0"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build_and_publish:
+    name: binary (build + upload GitHub Release assets)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          targets: ${{ inputs.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Release guard (tag version must match Cargo.toml)
+        id: release_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prefix="${{ inputs.tag_prefix }}"
+          pkg="${{ inputs.cargo_pkg }}"
+
+          if [[ "${tag}" != "${prefix}"* ]]; then
+            echo "Unexpected tag '${tag}'. Expected prefix '${prefix}'."
+            exit 1
+          fi
+
+          version="${tag#${prefix}}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+          # Stable releases are plain X.Y.Z. Pre-releases should include a hyphen.
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "stable=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "stable=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+          if ! cargo_version="$(
+            cargo metadata --no-deps --format-version=1 \
+              | jq -er --arg pkg "${pkg}" '[.packages[] | select(.name == $pkg) | .version][0]'
+          )"; then
+            echo "Failed to read version for cargo package '${pkg}' from cargo metadata."
+            exit 1
+          fi
+
+          if [[ "${version}" != "${cargo_version}" ]]; then
+            echo "Release guard failed:"
+            echo "  tag version:    ${version}"
+            echo "  Cargo.toml version (via cargo metadata for '${pkg}'): ${cargo_version}"
+            echo ""
+            echo "Fix by updating crates for '${pkg}' to version ${version}, or retag with ${prefix}${cargo_version}."
+            exit 1
+          fi
+
+      - name: Install musl tools
+        if: runner.os == 'Linux' && contains(inputs.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p "${{ inputs.cargo_pkg }}" --bin "${{ inputs.binary_name }}" --target "${{ inputs.target }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.release_meta.outputs.version }}"
+          target="${{ inputs.target }}"
+          bin="${{ inputs.binary_name }}"
+
+          mkdir -p dist
+          pkgdir="${bin}-v${version}-${target}"
+          mkdir -p "dist/${pkgdir}"
+
+          cp "target/${target}/release/${bin}" "dist/${pkgdir}/${bin}"
+          cp LICENSE "dist/${pkgdir}/LICENSE"
+          cp README.md "dist/${pkgdir}/README.md"
+
+          tarball="${bin}-v${version}-${target}.tar.gz"
+          (cd dist && tar -czf "${tarball}" "${pkgdir}")
+          (cd dist && sha256sum "${tarball}" > "${tarball}.sha256")
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ steps.release_meta.outputs.stable != 'true' }}
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256

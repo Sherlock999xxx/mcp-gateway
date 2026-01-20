@@ -1,0 +1,9 @@
+imports: []
+servers:
+  petstore:
+    type: openapi
+    spec: http://petstore:8080/api/v3/openapi.json
+    baseUrl: http://petstore:8080/api/v3
+    autoDiscover: true
+
+

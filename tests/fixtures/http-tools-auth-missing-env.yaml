@@ -1,0 +1,32 @@
+#
+# Docs-derived example config: demonstrates env expansion failure.
+# Expectation per docs: missing ${VAR} causes startup failure (explicit).
+#
+
+adapter:
+  bind: 127.0.0.1:19083
+  logLevel: info
+
+imports: []
+
+servers:
+  httpbin:
+    type: http
+    baseUrl: http://127.0.0.1:8081
+    auth:
+      type: header
+      name: X-Api-Key
+      value: "${UNRELATED_EXAMPLE_MISSING_KEY}"
+    tools:
+      echo_request:
+        method: POST
+        path: /anything/{id}
+        description: Echo request (used to validate missing-env startup failure).
+        params:
+          id:
+            in: path
+            required: true
+            schema:
+              type: string
+
+

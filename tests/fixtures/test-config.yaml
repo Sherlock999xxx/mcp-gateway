@@ -1,0 +1,19 @@
+# Test configuration for Unrelated MCP Adapter
+#
+# This is a minimal config that doesn't require any external MCP servers.
+# It uses the public Petstore API as an OpenAPI backend.
+
+adapter:
+  bind: "0.0.0.0:8080"
+  logLevel: info
+
+# No imports for this fixture
+imports: []
+
+# Servers
+servers:
+  petstore:
+    type: openapi
+    spec: "https://petstore3.swagger.io/api/v3/openapi.json"
+    baseUrl: "https://petstore3.swagger.io/api/v3"
+    autoDiscover: true

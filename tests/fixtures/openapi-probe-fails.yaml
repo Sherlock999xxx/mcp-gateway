@@ -1,0 +1,25 @@
+#
+# Docs-derived example probe: show what happens when openapiProbe=true
+# and the spec's server URL is unreachable (no baseUrl override).
+#
+# The OpenAPI spec used here declares:
+#   servers: [{ url: http://example.invalid }]
+#
+# If the adapter probes that URL at startup, it should fail to start unless
+# openapiProbe is disabled or baseUrl is overridden to a reachable host.
+#
+
+adapter:
+  bind: 127.0.0.1:19087
+  logLevel: info
+  # rely on default openapiProbe=true (per docs) to test probe behavior
+
+imports: []
+
+servers:
+  mini:
+    type: openapi
+    spec: ./tests/fixtures/openapi-mini-spec.yaml
+    autoDiscover: true
+
+

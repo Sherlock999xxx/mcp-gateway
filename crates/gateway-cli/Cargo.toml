@@ -1,0 +1,23 @@
+[package]
+name = "unrelated-gateway-admin"
+version = "0.8.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for managing Unrelated MCP Gateway (admin/control plane)"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+owo-colors = "4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+url = "2"
+unrelated-tool-transforms = { path = "../tool-transforms" }
+
+[[bin]]
+name = "unrelated-gateway-admin"
+path = "src/main.rs"
