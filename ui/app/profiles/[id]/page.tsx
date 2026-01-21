@@ -126,6 +126,14 @@ export default function ProfileDetailPage() {
     },
   });
 
+  const authIsDirty = useMemo(() => {
+    if (!profile || !authDraft) return false;
+    return (
+      authDraft.mode !== profile.dataPlaneAuth.mode ||
+      authDraft.acceptXApiKey !== profile.dataPlaneAuth.acceptXApiKey
+    );
+  }, [authDraft, profile]);
+
   const toggleEnabledMutation = useMutation({
     mutationFn: async (enabled: boolean) => {
       if (!profile) throw new Error("Profile not loaded");
@@ -490,8 +498,6 @@ export default function ProfileDetailPage() {
                   const nextMode = e.target.value as typeof authDraft.mode;
                   const next = { ...authDraft, mode: nextMode };
                   setAuthDraft(next);
-                  if (nextMode === "jwtEveryRequest" && oidcConfigured === false) return;
-                  updateAuthMutation.mutate(next);
                 }}
                 className="w-full rounded-lg border border-zinc-700/80 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500/50 hover:border-zinc-600/80"
               >
@@ -519,16 +525,44 @@ export default function ProfileDetailPage() {
               onChange={(checked) => {
                 const next = { ...authDraft, acceptXApiKey: checked };
                 setAuthDraft(next);
-                if (next.mode === "jwtEveryRequest" && oidcConfigured === false) return;
-                updateAuthMutation.mutate(next);
               }}
               label="Accept x-api-key header"
               description="Allows clients to send x-api-key instead of Authorization."
             />
 
             <ModalActions>
-              <Button type="button" onClick={() => setShowAuthSettings(false)}>
-                Close
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  // Cancel/discard changes.
+                  setShowAuthSettings(false);
+                  if (profile) {
+                    setAuthDraft({
+                      mode: profile.dataPlaneAuth.mode,
+                      acceptXApiKey: profile.dataPlaneAuth.acceptXApiKey,
+                    });
+                  }
+                }}
+                disabled={updateAuthMutation.isPending}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                loading={updateAuthMutation.isPending}
+                disabled={
+                  updateAuthMutation.isPending ||
+                  !authIsDirty ||
+                  (authDraft.mode === "jwtEveryRequest" && oidcConfigured === false)
+                }
+                onClick={() => {
+                  if (authDraft.mode === "jwtEveryRequest" && oidcConfigured === false) return;
+                  updateAuthMutation.mutate(authDraft);
+                }}
+              >
+                Apply
               </Button>
             </ModalActions>
           </div>
