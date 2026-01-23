@@ -310,7 +310,7 @@ export default function ProfileDetailPage() {
           ) : (
             <div className="flex items-center gap-3">
               <span className="truncate">{profile?.name ?? "Profile"}</span>
-              {profile && (
+              {profile && !editingMeta && (
                 <button
                   type="button"
                   onClick={() => {
@@ -350,14 +350,14 @@ export default function ProfileDetailPage() {
           </div>
         )}
 
-        {editingMeta && profile ? (
+        {profile ? (
           <EditProfilePanel
-            key={profile.id}
+            open={editingMeta}
             profile={profile}
             saving={updateMetaMutation.isPending}
             saveError={metaSaveError}
             onSave={saveMeta}
-            onCancel={() => {
+            onClose={() => {
               setMetaSaveError(null);
               setEditingMeta(false);
             }}
