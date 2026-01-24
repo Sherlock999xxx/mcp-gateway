@@ -23,7 +23,7 @@ ENV NEXT_PUBLIC_UI_VERSION=$UI_VERSION
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-RUN npm install -g npm@11.7.0 && npm cache clean --force
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 # Next.js "standalone" output (see next.config.ts)
 COPY --from=builder /app/public ./public
