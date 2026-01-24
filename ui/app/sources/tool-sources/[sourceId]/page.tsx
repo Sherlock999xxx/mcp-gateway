@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell, PageContent, PageHeader } from "@/components/layout";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, ConfirmModal, Input, Textarea } from "@/components/ui";
+import { Button, ConfirmModal, Input, Textarea, Toggle } from "@/components/ui";
 import { qk } from "@/src/lib/queryKeys";
 import { useToastStore } from "@/src/lib/toast-store";
 import * as tenantApi from "@/src/lib/tenantApi";
@@ -541,11 +541,11 @@ function OpenApiEditor({
               Discover operations from the spec automatically.
             </div>
           </div>
-          <input
-            type="checkbox"
+          <Toggle
             checked={autoDiscoverEnabled}
-            onChange={(e) => form.setValue("autoDiscoverEnabled", e.target.checked)}
-            className="h-4 w-4 accent-violet-500"
+            onChange={(checked) =>
+              form.setValue("autoDiscoverEnabled", checked, { shouldDirty: true })
+            }
           />
         </div>
 
