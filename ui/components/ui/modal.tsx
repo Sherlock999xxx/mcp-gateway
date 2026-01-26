@@ -1,6 +1,7 @@
 "use client";
 
 import { type ReactNode, useEffect, useCallback, useState } from "react";
+import { createPortal } from "react-dom";
 import { Button } from "./button";
 import { Input } from "./input";
 import { CopyBlock } from "./copy-block";
@@ -42,8 +43,10 @@ export function Modal({ open, onClose, children, title, description, size = "md"
 
   if (!open) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
@@ -54,6 +57,7 @@ export function Modal({ open, onClose, children, title, description, size = "md"
       <div
         className={`
           relative w-full ${sizeStyles[size]}
+          max-h-[calc(100vh-2rem)] overflow-y-auto
           bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl shadow-black/50
           animate-in fade-in zoom-in-95 duration-200
         `}
@@ -77,7 +81,8 @@ export function Modal({ open, onClose, children, title, description, size = "md"
           <XIcon className="w-5 h-5" />
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
