@@ -2,6 +2,25 @@
 
 This repository is newly public. Earlier internal iteration notes are intentionally omitted.
 
+## 2026-01-26
+
+- Gateway: `0.8.1`
+- Gateway admin CLI: `0.8.1`
+- Tenant-level Web UI: `0.4.2`
+
+### Gateway
+
+- Fix profile deletion to be a hard delete in Postgres mode (including cleanup of durable contract events).
+- Tenant API: `DELETE /profiles/:id` now returns a JSON `{ ok: true }` response on success.
+
+### Web UI
+
+- Unlock page: replace the “Settings” link with an inline “I want to know how” reset guide modal (includes `make up-reset`).
+- Fix modals being clipped/hidden by layout effects by rendering modals via a portal.
+- Improve confirm/warning modal spacing and general toggle consistency across pages.
+- Profile tools: fix the “Enabled only / All tools” switch layout and prevent tool allowlist resets when disabling the last tool.
+- Reduce UI flicker by avoiding unnecessary automatic surface re-probes after small edits.
+
 ## 2026-01-24
 
 - Tenant-level Web UI: `0.4.1`
