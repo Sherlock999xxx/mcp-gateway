@@ -262,4 +262,3 @@ function LoadingSpinner({ className }: { className?: string }) {
     </svg>
   );
 }
-

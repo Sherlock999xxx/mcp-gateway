@@ -45,13 +45,12 @@ export function Toggle({
     </button>
   );
 
-  const Text =
-    hasText ? (
-      <div className={`flex flex-col ${textAlign}`.trim()}>
-        {label && <span className="text-sm font-medium text-zinc-200">{label}</span>}
-        {description && <span className="text-xs text-zinc-500">{description}</span>}
-      </div>
-    ) : null;
+  const Text = hasText ? (
+    <div className={`flex flex-col ${textAlign}`.trim()}>
+      {label && <span className="text-sm font-medium text-zinc-200">{label}</span>}
+      {description && <span className="text-xs text-zinc-500">{description}</span>}
+    </div>
+  ) : null;
 
   return (
     <label
