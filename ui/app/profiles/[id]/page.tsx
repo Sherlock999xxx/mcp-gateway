@@ -84,6 +84,12 @@ export default function ProfileDetailPage() {
 
   type SurfaceResponse = ProfileSurface;
   const DISABLE_ALL_TOOLS_SENTINEL = "__none__:__none__";
+  const deleteRequireText = useMemo(() => {
+    if (!profile) return undefined;
+    const n = profile.name.trim();
+    // If the name is very long, prefer an ID confirmation (still copy/paste friendly).
+    return n && n.length <= 48 ? n : profile.id;
+  }, [profile]);
 
   const [surfaceByProfileId, setSurfaceByProfileId] = useState<
     Record<string, SurfaceResponse | undefined>
@@ -532,6 +538,7 @@ export default function ProfileDetailPage() {
         onConfirm={() => deleteMutation.mutate()}
         title="Delete profile?"
         description={`This will permanently delete "${profile?.name ?? profileId}". This action cannot be undone.`}
+        requireText={deleteRequireText}
         confirmLabel="Delete Profile"
         danger
         loading={deleteMutation.isPending}
