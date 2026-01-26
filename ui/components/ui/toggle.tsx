@@ -18,6 +18,7 @@ export function Toggle({
   switchSide = "left",
 }: ToggleProps) {
   const hasText = Boolean(label || description);
+  const isSingleLine = Boolean(label) && !description;
   const textAlign = switchSide === "right" ? "text-right items-end" : "text-left items-start";
 
   const Switch = (
@@ -54,7 +55,7 @@ export function Toggle({
 
   return (
     <label
-      className={`flex items-start gap-3 ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+      className={`flex ${isSingleLine ? "items-center" : "items-start"} gap-3 ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
     >
       {switchSide === "right" ? (
         <>
