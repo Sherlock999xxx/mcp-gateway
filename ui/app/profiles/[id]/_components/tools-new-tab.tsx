@@ -251,7 +251,6 @@ export function ToolsNewTab({
         if (!old) return old;
         return { ...old, transforms: nextTransforms };
       });
-      onProbe();
     },
     onError: (e) => {
       const msg = e instanceof Error ? e.message : "Failed to save transforms";
