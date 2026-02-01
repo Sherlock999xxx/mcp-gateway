@@ -63,6 +63,10 @@ pub fn router(state: Arc<TenantState>) -> Router {
             get(get_profile).put(put_profile).delete(delete_profile),
         )
         .route(
+            "/tenant/v1/profiles/{profile_id}/audit/settings",
+            get(get_profile_audit_settings).put(put_profile_audit_settings),
+        )
+        .route(
             "/tenant/v1/profiles/{profile_id}/surface",
             get(get_profile_surface),
         )
@@ -92,6 +96,19 @@ pub fn router(state: Arc<TenantState>) -> Router {
             get(list_api_keys).post(create_api_key),
         )
         .route("/tenant/v1/api-keys/{api_key_id}", delete(revoke_api_key))
+        .route(
+            "/tenant/v1/audit/settings",
+            get(get_audit_settings).put(put_audit_settings),
+        )
+        .route("/tenant/v1/audit/events", get(list_audit_events))
+        .route(
+            "/tenant/v1/audit/analytics/tool-calls/by-tool",
+            get(tool_call_stats_by_tool),
+        )
+        .route(
+            "/tenant/v1/audit/analytics/tool-calls/by-api-key",
+            get(tool_call_stats_by_api_key),
+        )
         .layer(axum::Extension(state))
 }
 
@@ -1656,6 +1673,92 @@ struct OkResponse {
     ok: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TenantAuditSettingsResponse {
+    enabled: bool,
+    retention_days: i32,
+    default_level: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PutTenantAuditSettingsRequest {
+    enabled: bool,
+    retention_days: i32,
+    default_level: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditEventsQuery {
+    #[serde(default)]
+    from_unix_secs: Option<i64>,
+    #[serde(default)]
+    to_unix_secs: Option<i64>,
+    #[serde(default)]
+    before_id: Option<i64>,
+    #[serde(default)]
+    profile_id: Option<String>,
+    #[serde(default)]
+    api_key_id: Option<String>,
+    #[serde(default)]
+    tool_ref: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    ok: Option<bool>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditEventsResponse {
+    events: Vec<crate::store::AuditEventRow>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditStatsQuery {
+    #[serde(default)]
+    from_unix_secs: Option<i64>,
+    #[serde(default)]
+    to_unix_secs: Option<i64>,
+    #[serde(default)]
+    profile_id: Option<String>,
+    #[serde(default)]
+    api_key_id: Option<String>,
+    #[serde(default)]
+    tool_ref: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolCallStatsByToolResponse {
+    items: Vec<crate::store::ToolCallStatsByTool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolCallStatsByApiKeyResponse {
+    items: Vec<crate::store::ToolCallStatsByApiKey>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileAuditSettingsResponse {
+    audit_settings: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PutProfileAuditSettingsRequest {
+    audit_settings: Value,
+}
+
 fn is_valid_source_id(id: &str) -> bool {
     !id.is_empty()
         && !id.contains(':')
@@ -2703,6 +2806,344 @@ async fn revoke_api_key(
             elapsed: started.elapsed(),
             meta: serde_json::json!({
                 "api_key_id": api_key_id_for_meta,
+            }),
+            error,
+        }))
+        .await;
+
+    resp
+}
+
+fn validate_audit_default_level(level: &str) -> Result<(), &'static str> {
+    match level {
+        "off" | "summary" | "metadata" | "payload" => Ok(()),
+        _ => Err("invalid defaultLevel (allowed: off|summary|metadata|payload)"),
+    }
+}
+
+async fn get_audit_settings(
+    axum::Extension(state): axum::Extension<Arc<TenantState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let tenant_id = match authn(&headers, &state.signer) {
+        Ok(t) => t,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = &state.store else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
+    };
+
+    // Ensure tenant exists + enabled.
+    match store.get_tenant(&tenant_id).await {
+        Ok(Some(t)) if t.enabled => {}
+        Ok(_) => return (StatusCode::UNAUTHORIZED, "invalid tenant").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    match store.get_tenant_audit_settings(&tenant_id).await {
+        Ok(Some(s)) => Json(TenantAuditSettingsResponse {
+            enabled: s.enabled,
+            retention_days: s.retention_days,
+            default_level: s.default_level,
+        })
+        .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "tenant not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn put_audit_settings(
+    axum::Extension(state): axum::Extension<Arc<TenantState>>,
+    headers: HeaderMap,
+    Json(req): Json<PutTenantAuditSettingsRequest>,
+) -> impl IntoResponse {
+    let tenant_id = match authn(&headers, &state.signer) {
+        Ok(t) => t,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = &state.store else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
+    };
+    let started = Instant::now();
+
+    // Ensure tenant exists + enabled.
+    match store.get_tenant(&tenant_id).await {
+        Ok(Some(t)) if t.enabled => {}
+        Ok(_) => return (StatusCode::UNAUTHORIZED, "invalid tenant").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    if req.retention_days < 0 {
+        return (StatusCode::BAD_REQUEST, "retentionDays must be >= 0").into_response();
+    }
+    if let Err(msg) = validate_audit_default_level(req.default_level.trim()) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+
+    let settings = crate::store::TenantAuditSettings {
+        enabled: req.enabled,
+        retention_days: req.retention_days,
+        default_level: req.default_level.trim().to_string(),
+    };
+
+    let (status, ok, error, resp) =
+        match store.put_tenant_audit_settings(&tenant_id, &settings).await {
+            Ok(()) => (
+                StatusCode::OK,
+                true,
+                None,
+                Json(OkResponse { ok: true }).into_response(),
+            ),
+            Err(e) => {
+                let msg = e.to_string();
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    false,
+                    Some(AuditError::new("internal_error", msg.clone())),
+                    (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+                )
+            }
+        };
+
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id.clone(),
+            actor: AuditActor::default(),
+            action: "tenant.audit_settings_put",
+            http_method: "PUT",
+            http_route: "/tenant/v1/audit/settings",
+            status_code: i32::from(status.as_u16()),
+            ok,
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "enabled": settings.enabled,
+                "retention_days": settings.retention_days,
+                "default_level": settings.default_level,
+            }),
+            error,
+        }))
+        .await;
+
+    resp
+}
+
+async fn list_audit_events(
+    axum::Extension(state): axum::Extension<Arc<TenantState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<AuditEventsQuery>,
+) -> impl IntoResponse {
+    let tenant_id = match authn(&headers, &state.signer) {
+        Ok(t) => t,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = &state.store else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
+    };
+
+    // Ensure tenant exists + enabled.
+    match store.get_tenant(&tenant_id).await {
+        Ok(Some(t)) if t.enabled => {}
+        Ok(_) => return (StatusCode::UNAUTHORIZED, "invalid tenant").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    let filter = crate::store::AuditEventFilter {
+        from_unix_secs: q.from_unix_secs,
+        to_unix_secs: q.to_unix_secs,
+        before_id: q.before_id,
+        profile_id: q.profile_id,
+        api_key_id: q.api_key_id,
+        tool_ref: q.tool_ref,
+        action: q.action,
+        ok: q.ok,
+        limit: q.limit.unwrap_or(200).clamp(1, 1000),
+    };
+
+    match store.list_audit_events(&tenant_id, filter).await {
+        Ok(events) => Json(AuditEventsResponse { events }).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+async fn tool_call_stats_by_tool(
+    axum::Extension(state): axum::Extension<Arc<TenantState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<AuditStatsQuery>,
+) -> impl IntoResponse {
+    let tenant_id = match authn(&headers, &state.signer) {
+        Ok(t) => t,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = &state.store else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
+    };
+
+    match store.get_tenant(&tenant_id).await {
+        Ok(Some(t)) if t.enabled => {}
+        Ok(_) => return (StatusCode::UNAUTHORIZED, "invalid tenant").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    let filter = crate::store::AuditStatsFilter {
+        from_unix_secs: q.from_unix_secs,
+        to_unix_secs: q.to_unix_secs,
+        profile_id: q.profile_id,
+        api_key_id: q.api_key_id,
+        tool_ref: q.tool_ref,
+        limit: q.limit.unwrap_or(100).clamp(1, 1000),
+    };
+
+    match store.tool_call_stats_by_tool(&tenant_id, filter).await {
+        Ok(items) => Json(ToolCallStatsByToolResponse { items }).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+async fn tool_call_stats_by_api_key(
+    axum::Extension(state): axum::Extension<Arc<TenantState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<AuditStatsQuery>,
+) -> impl IntoResponse {
+    let tenant_id = match authn(&headers, &state.signer) {
+        Ok(t) => t,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = &state.store else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
+    };
+
+    match store.get_tenant(&tenant_id).await {
+        Ok(Some(t)) if t.enabled => {}
+        Ok(_) => return (StatusCode::UNAUTHORIZED, "invalid tenant").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    let filter = crate::store::AuditStatsFilter {
+        from_unix_secs: q.from_unix_secs,
+        to_unix_secs: q.to_unix_secs,
+        profile_id: q.profile_id,
+        api_key_id: q.api_key_id,
+        tool_ref: q.tool_ref,
+        limit: q.limit.unwrap_or(100).clamp(1, 1000),
+    };
+
+    match store.tool_call_stats_by_api_key(&tenant_id, filter).await {
+        Ok(items) => Json(ToolCallStatsByApiKeyResponse { items }).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+async fn get_profile_audit_settings(
+    axum::Extension(state): axum::Extension<Arc<TenantState>>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+) -> impl IntoResponse {
+    let tenant_id = match authn(&headers, &state.signer) {
+        Ok(t) => t,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = &state.store else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
+    };
+
+    // UUIDv4 only, otherwise 404 (avoid enumeration patterns).
+    if Uuid::parse_str(&profile_id)
+        .ok()
+        .and_then(|u| (u.get_version() == Some(Version::Random)).then_some(u))
+        .is_none()
+    {
+        return (StatusCode::NOT_FOUND, "profile not found").into_response();
+    }
+
+    // Cross-tenant guard (404 on mismatch).
+    match store.get_profile(&profile_id).await {
+        Ok(Some(p)) if p.tenant_id == tenant_id && p.enabled => {}
+        Ok(_) => return (StatusCode::NOT_FOUND, "profile not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    match store.get_profile_audit_settings(&profile_id).await {
+        Ok(Some(v)) => Json(ProfileAuditSettingsResponse { audit_settings: v }).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "profile not found").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn put_profile_audit_settings(
+    axum::Extension(state): axum::Extension<Arc<TenantState>>,
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+    Json(req): Json<PutProfileAuditSettingsRequest>,
+) -> impl IntoResponse {
+    let tenant_id = match authn(&headers, &state.signer) {
+        Ok(t) => t,
+        Err(resp) => return resp.into_response(),
+    };
+    let Some(store) = &state.store else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
+    };
+    let started = Instant::now();
+
+    // UUIDv4 only, otherwise 404 (avoid enumeration patterns).
+    let profile_uuid = match Uuid::parse_str(&profile_id) {
+        Ok(u) if u.get_version() == Some(Version::Random) => u,
+        _ => return (StatusCode::NOT_FOUND, "profile not found").into_response(),
+    };
+
+    // Cross-tenant guard (404 on mismatch).
+    match store.get_profile(&profile_id).await {
+        Ok(Some(p)) if p.tenant_id == tenant_id && p.enabled => {}
+        Ok(_) => return (StatusCode::NOT_FOUND, "profile not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
+    if !req.audit_settings.is_object() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "auditSettings must be a JSON object",
+        )
+            .into_response();
+    }
+
+    let (status, ok, error, resp) = match store
+        .put_profile_audit_settings(&profile_id, req.audit_settings.clone())
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            true,
+            None,
+            Json(OkResponse { ok: true }).into_response(),
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                Some(AuditError::new("internal_error", msg.clone())),
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+            )
+        }
+    };
+
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id.clone(),
+            actor: AuditActor {
+                profile_id: Some(profile_uuid),
+                ..AuditActor::default()
+            },
+            action: "tenant.profile_audit_settings_put",
+            http_method: "PUT",
+            http_route: "/tenant/v1/profiles/{profile_id}/audit/settings",
+            status_code: i32::from(status.as_u16()),
+            ok,
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "profile_id": profile_id,
+                "audit_settings": req.audit_settings,
             }),
             error,
         }))
