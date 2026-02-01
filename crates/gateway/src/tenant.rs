@@ -1,3 +1,4 @@
+use crate::audit::{AuditActor, AuditError, HttpAuditEvent};
 use crate::profile_http::{
     DataPlaneAuthSettings, DataPlaneLimitsSettings, NullableString, NullableU64,
     default_data_plane_auth_mode, default_true, resolve_nullable_u64, validate_tool_allowlist,
@@ -20,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::Digest as _;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use unrelated_http_tools::config::AuthConfig;
 use unrelated_http_tools::config::HttpServerConfig;
 use unrelated_openapi_tools::config::{
@@ -30,6 +31,8 @@ use unrelated_openapi_tools::runtime::OpenApiToolSource;
 use unrelated_tool_transforms::TransformPipeline;
 use uuid::{Uuid, Version};
 
+const OIDC_NOT_CONFIGURED_MSG: &str = "JWT/OIDC is unavailable because OIDC is not configured on the Gateway (missing UNRELATED_GATEWAY_OIDC_ISSUER). Configure OIDC or choose a different mode.";
+
 #[derive(Clone)]
 pub struct TenantState {
     pub store: Option<Arc<dyn AdminStore>>,
@@ -37,6 +40,7 @@ pub struct TenantState {
     pub shared_source_ids: Arc<std::collections::HashSet<String>>,
     /// Shared MCP data-plane state (used for profile surface probing).
     pub mcp_state: Arc<crate::mcp::McpState>,
+    pub audit: Arc<dyn crate::audit::AuditSink>,
 }
 
 pub fn router(state: Arc<TenantState>) -> Router {
@@ -779,15 +783,12 @@ async fn create_profile(
         .into_response()
 }
 
-#[allow(clippy::too_many_lines)]
 async fn put_profile(
     axum::Extension(state): axum::Extension<Arc<TenantState>>,
     headers: HeaderMap,
     Path(profile_id): Path<String>,
     Json(req): Json<PutProfileRequest>,
 ) -> impl IntoResponse {
-    const OIDC_NOT_CONFIGURED_MSG: &str = "JWT/OIDC is unavailable because OIDC is not configured on the Gateway (missing UNRELATED_GATEWAY_OIDC_ISSUER). Configure OIDC or choose a different mode.";
-
     let tenant_id = match authn(&headers, &state.signer) {
         Ok(t) => t,
         Err(resp) => return resp.into_response(),
@@ -795,56 +796,164 @@ async fn put_profile(
     let Some(store) = &state.store else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
     };
+    let started = Instant::now();
 
-    let profile_uuid = match Uuid::parse_str(&profile_id) {
-        Ok(u) if u.get_version() == Some(Version::Random) => u,
-        _ => return (StatusCode::NOT_FOUND, "profile not found").into_response(),
-    };
+    let outcome =
+        tenant_put_profile_inner(state.as_ref(), store.as_ref(), &tenant_id, profile_id, req).await;
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id.clone(),
+            actor: AuditActor {
+                profile_id: outcome.profile_uuid,
+                ..AuditActor::default()
+            },
+            action: "tenant.profile_put",
+            http_method: "PUT",
+            http_route: "/tenant/v1/profiles/{profile_id}",
+            status_code: i32::from(outcome.status.as_u16()),
+            ok: outcome.status.is_success(),
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "profile_id": outcome.profile_id_for_meta,
+                "name": outcome.name_for_meta,
+                "enabled": outcome.enabled_for_meta,
+            }),
+            error: outcome.error,
+        }))
+        .await;
+    outcome.resp
+}
 
-    // Cross-tenant guard (404 on mismatch).
-    let existing = match store.get_profile(&profile_id).await {
-        Ok(Some(p)) if p.tenant_id == tenant_id => p,
-        Ok(_) => return (StatusCode::NOT_FOUND, "profile not found").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
+struct TenantPutProfileOutcome {
+    resp: axum::response::Response,
+    status: StatusCode,
+    error: Option<AuditError>,
+    profile_uuid: Option<Uuid>,
+    profile_id_for_meta: String,
+    name_for_meta: Option<String>,
+    enabled_for_meta: bool,
+}
 
-    let name = req.name.unwrap_or_else(|| existing.name.clone());
-    if name.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "name is required").into_response();
+impl TenantPutProfileOutcome {
+    fn fail(
+        profile_id_for_meta: String,
+        enabled_for_meta: bool,
+        profile_uuid: Option<Uuid>,
+        status: StatusCode,
+        message: impl Into<String>,
+        error: AuditError,
+        name_for_meta: Option<String>,
+    ) -> Self {
+        let msg = message.into();
+        Self {
+            resp: (status, msg.clone()).into_response(),
+            status,
+            error: Some(error),
+            profile_uuid,
+            profile_id_for_meta,
+            name_for_meta,
+            enabled_for_meta,
+        }
     }
+
+    fn ok(
+        profile_id_for_meta: String,
+        enabled_for_meta: bool,
+        profile_uuid: Uuid,
+        name: String,
+    ) -> Self {
+        Self {
+            resp: Json(CreateProfileResponse {
+                ok: true,
+                data_plane_path: format!("/{profile_id_for_meta}/mcp"),
+                id: profile_id_for_meta.clone(),
+            })
+            .into_response(),
+            status: StatusCode::OK,
+            error: None,
+            profile_uuid: Some(profile_uuid),
+            profile_id_for_meta,
+            name_for_meta: Some(name),
+            enabled_for_meta,
+        }
+    }
+}
+
+async fn tenant_put_profile_inner(
+    state: &TenantState,
+    store: &dyn crate::store::AdminStore,
+    tenant_id: &str,
+    profile_id: String,
+    req: PutProfileRequest,
+) -> TenantPutProfileOutcome {
+    match tenant_put_profile_inner_impl(state, store, tenant_id, profile_id, req).await {
+        Ok(out) => out,
+        Err(out) => *out,
+    }
+}
+
+type TenantPutProfileStep<T> = Result<T, Box<TenantPutProfileOutcome>>;
+
+async fn tenant_put_profile_inner_impl(
+    state: &TenantState,
+    store: &dyn crate::store::AdminStore,
+    tenant_id: &str,
+    profile_id: String,
+    req: PutProfileRequest,
+) -> TenantPutProfileStep<TenantPutProfileOutcome> {
+    let enabled_for_meta = req.enabled;
+    let profile_uuid = tenant_put_profile_parse_uuid(&profile_id, enabled_for_meta)?;
+    let existing = tenant_put_profile_load_existing(
+        store,
+        tenant_id,
+        &profile_id,
+        enabled_for_meta,
+        profile_uuid,
+    )
+    .await?;
+    let name = tenant_put_profile_resolve_name(
+        &profile_id,
+        enabled_for_meta,
+        profile_uuid,
+        &existing,
+        req.name,
+    )?;
+
     let description: Option<String> = match req.description {
         None => existing.description.clone(),
         Some(NullableString::Null) => None,
         Some(NullableString::Value(v)) => Some(v),
     };
-    let resolved_upstreams =
-        match resolve_upstream_ids_for_tenant(store.as_ref(), &tenant_id, &req.upstreams).await {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-    if let Err(resp) =
-        validate_no_self_upstream_loop(store.as_ref(), &profile_id, &resolved_upstreams).await
-    {
-        return resp;
-    }
+    let resolved_upstreams = tenant_put_profile_resolve_upstreams(
+        store,
+        tenant_id,
+        &profile_id,
+        enabled_for_meta,
+        profile_uuid,
+        &name,
+        &req.upstreams,
+    )
+    .await?;
+
     let enabled_tools = req.tools.unwrap_or_default();
-    let data_plane_auth = req.data_plane_auth.unwrap_or(DataPlaneAuthSettings {
-        mode: existing.data_plane_auth_mode,
-        accept_x_api_key: existing.accept_x_api_key,
-    });
-    if data_plane_auth.mode == DataPlaneAuthMode::JwtEveryRequest && state.mcp_state.oidc.is_none()
-    {
-        return (StatusCode::BAD_REQUEST, OIDC_NOT_CONFIGURED_MSG).into_response();
-    }
-    let data_plane_limits = req.data_plane_limits.unwrap_or(DataPlaneLimitsSettings {
-        rate_limit_enabled: existing.rate_limit_enabled,
-        rate_limit_tool_calls_per_minute: existing.rate_limit_tool_calls_per_minute,
-        quota_enabled: existing.quota_enabled,
-        quota_tool_calls: existing.quota_tool_calls,
-    });
-    if let Err(msg) = data_plane_limits.validate() {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
+    let data_plane_auth = tenant_put_profile_resolve_auth(
+        state,
+        &profile_id,
+        enabled_for_meta,
+        profile_uuid,
+        &existing,
+        &name,
+        req.data_plane_auth,
+    )?;
+    let data_plane_limits = tenant_put_profile_resolve_limits(
+        &profile_id,
+        enabled_for_meta,
+        profile_uuid,
+        &existing,
+        &name,
+        req.data_plane_limits,
+    )?;
 
     let tool_call_timeout_secs =
         resolve_nullable_u64(req.tool_call_timeout_secs, existing.tool_call_timeout_secs);
@@ -852,55 +961,329 @@ async fn put_profile(
         .tool_policies
         .clone()
         .unwrap_or_else(|| existing.tool_policies.clone());
-
     let mcp = req.mcp.clone().unwrap_or_else(|| existing.mcp.clone());
-    if let Err(msg) = validate_tool_timeout_and_policies(tool_call_timeout_secs, &tool_policies) {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
-    if let Err(msg) = validate_tool_allowlist(&enabled_tools) {
-        return (StatusCode::BAD_REQUEST, msg).into_response();
-    }
 
+    tenant_put_profile_validate_tools(
+        &profile_id,
+        enabled_for_meta,
+        profile_uuid,
+        &name,
+        &enabled_tools,
+        tool_call_timeout_secs,
+        &tool_policies,
+    )?;
+
+    tenant_put_profile_store_put(
+        store,
+        TenantPutProfileStorePutInput {
+            tenant_id,
+            profile_id: &profile_id,
+            enabled_for_meta,
+            profile_uuid,
+            name_for_meta: &name,
+            description: description.as_deref(),
+            enabled: req.enabled,
+            allow_partial_upstreams: req.allow_partial_upstreams,
+            resolved_upstreams: &resolved_upstreams,
+            sources: &req.sources,
+            transforms: &req.transforms,
+            enabled_tools: &enabled_tools,
+            data_plane_auth: &data_plane_auth,
+            data_plane_limits: &data_plane_limits,
+            tool_call_timeout_secs,
+            tool_policies: &tool_policies,
+            mcp: &mcp,
+        },
+    )
+    .await?;
+
+    Ok(TenantPutProfileOutcome::ok(
+        profile_id,
+        enabled_for_meta,
+        profile_uuid,
+        name,
+    ))
+}
+
+fn tenant_put_profile_parse_uuid(
+    profile_id: &str,
+    enabled_for_meta: bool,
+) -> TenantPutProfileStep<Uuid> {
+    let Some(profile_uuid) = Uuid::parse_str(profile_id)
+        .ok()
+        .and_then(|u| (u.get_version() == Some(Version::Random)).then_some(u))
+    else {
+        return Err(Box::new(TenantPutProfileOutcome::fail(
+            profile_id.to_string(),
+            enabled_for_meta,
+            None,
+            StatusCode::NOT_FOUND,
+            "profile not found",
+            AuditError::new("not_found", "profile not found"),
+            None,
+        )));
+    };
+    Ok(profile_uuid)
+}
+
+async fn tenant_put_profile_load_existing(
+    store: &dyn crate::store::AdminStore,
+    tenant_id: &str,
+    profile_id: &str,
+    enabled_for_meta: bool,
+    profile_uuid: Uuid,
+) -> TenantPutProfileStep<crate::store::AdminProfile> {
+    match store.get_profile(profile_id).await {
+        Ok(Some(p)) if p.tenant_id == tenant_id => Ok(p),
+        Ok(_) => Err(Box::new(TenantPutProfileOutcome::fail(
+            profile_id.to_string(),
+            enabled_for_meta,
+            Some(profile_uuid),
+            StatusCode::NOT_FOUND,
+            "profile not found",
+            AuditError::new("not_found", "profile not found"),
+            None,
+        ))),
+        Err(e) => {
+            let msg = e.to_string();
+            Err(Box::new(TenantPutProfileOutcome::fail(
+                profile_id.to_string(),
+                enabled_for_meta,
+                Some(profile_uuid),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                msg.clone(),
+                AuditError::new("internal_error", msg),
+                None,
+            )))
+        }
+    }
+}
+
+fn tenant_put_profile_resolve_name(
+    profile_id: &str,
+    enabled_for_meta: bool,
+    profile_uuid: Uuid,
+    existing: &crate::store::AdminProfile,
+    req_name: Option<String>,
+) -> TenantPutProfileStep<String> {
+    let name = req_name.unwrap_or_else(|| existing.name.clone());
+    if name.trim().is_empty() {
+        return Err(Box::new(TenantPutProfileOutcome::fail(
+            profile_id.to_string(),
+            enabled_for_meta,
+            Some(profile_uuid),
+            StatusCode::BAD_REQUEST,
+            "name is required",
+            AuditError::new("bad_request", "name is required"),
+            None,
+        )));
+    }
+    Ok(name)
+}
+
+async fn tenant_put_profile_resolve_upstreams(
+    store: &dyn crate::store::AdminStore,
+    tenant_id: &str,
+    profile_id: &str,
+    enabled_for_meta: bool,
+    profile_uuid: Uuid,
+    name_for_meta: &str,
+    upstreams: &[String],
+) -> TenantPutProfileStep<Vec<String>> {
+    let resolved = match resolve_upstream_ids_for_tenant(store, tenant_id, upstreams).await {
+        Ok(v) => v,
+        Err(resp) => {
+            let status = resp.status();
+            return Err(Box::new(TenantPutProfileOutcome {
+                resp,
+                status,
+                error: Some(AuditError::new("request_failed", status.to_string())),
+                profile_uuid: Some(profile_uuid),
+                profile_id_for_meta: profile_id.to_string(),
+                name_for_meta: Some(name_for_meta.to_string()),
+                enabled_for_meta,
+            }));
+        }
+    };
+    if let Err(resp) = validate_no_self_upstream_loop(store, profile_id, &resolved).await {
+        let status = resp.status();
+        return Err(Box::new(TenantPutProfileOutcome {
+            resp,
+            status,
+            error: Some(AuditError::new("bad_request", status.to_string())),
+            profile_uuid: Some(profile_uuid),
+            profile_id_for_meta: profile_id.to_string(),
+            name_for_meta: Some(name_for_meta.to_string()),
+            enabled_for_meta,
+        }));
+    }
+    Ok(resolved)
+}
+
+fn tenant_put_profile_resolve_auth(
+    state: &TenantState,
+    profile_id: &str,
+    enabled_for_meta: bool,
+    profile_uuid: Uuid,
+    existing: &crate::store::AdminProfile,
+    name_for_meta: &str,
+    req: Option<DataPlaneAuthSettings>,
+) -> TenantPutProfileStep<DataPlaneAuthSettings> {
+    let auth = req.unwrap_or(DataPlaneAuthSettings {
+        mode: existing.data_plane_auth_mode,
+        accept_x_api_key: existing.accept_x_api_key,
+    });
+    if auth.mode == DataPlaneAuthMode::JwtEveryRequest && state.mcp_state.oidc.is_none() {
+        return Err(Box::new(TenantPutProfileOutcome::fail(
+            profile_id.to_string(),
+            enabled_for_meta,
+            Some(profile_uuid),
+            StatusCode::BAD_REQUEST,
+            OIDC_NOT_CONFIGURED_MSG,
+            AuditError::new("bad_request", OIDC_NOT_CONFIGURED_MSG),
+            Some(name_for_meta.to_string()),
+        )));
+    }
+    Ok(auth)
+}
+
+fn tenant_put_profile_resolve_limits(
+    profile_id: &str,
+    enabled_for_meta: bool,
+    profile_uuid: Uuid,
+    existing: &crate::store::AdminProfile,
+    name_for_meta: &str,
+    req: Option<DataPlaneLimitsSettings>,
+) -> TenantPutProfileStep<DataPlaneLimitsSettings> {
+    let limits = req.unwrap_or(DataPlaneLimitsSettings {
+        rate_limit_enabled: existing.rate_limit_enabled,
+        rate_limit_tool_calls_per_minute: existing.rate_limit_tool_calls_per_minute,
+        quota_enabled: existing.quota_enabled,
+        quota_tool_calls: existing.quota_tool_calls,
+    });
+    if let Err(msg) = limits.validate() {
+        let msg_string = msg.to_string();
+        return Err(Box::new(TenantPutProfileOutcome::fail(
+            profile_id.to_string(),
+            enabled_for_meta,
+            Some(profile_uuid),
+            StatusCode::BAD_REQUEST,
+            msg,
+            AuditError::new("bad_request", msg_string),
+            Some(name_for_meta.to_string()),
+        )));
+    }
+    Ok(limits)
+}
+
+fn tenant_put_profile_validate_tools(
+    profile_id: &str,
+    enabled_for_meta: bool,
+    profile_uuid: Uuid,
+    name_for_meta: &str,
+    enabled_tools: &[String],
+    tool_call_timeout_secs: Option<u64>,
+    tool_policies: &[ToolPolicy],
+) -> TenantPutProfileStep<()> {
+    if let Err(msg) = validate_tool_timeout_and_policies(tool_call_timeout_secs, tool_policies) {
+        return Err(Box::new(TenantPutProfileOutcome::fail(
+            profile_id.to_string(),
+            enabled_for_meta,
+            Some(profile_uuid),
+            StatusCode::BAD_REQUEST,
+            msg.clone(),
+            AuditError::new("bad_request", msg),
+            Some(name_for_meta.to_string()),
+        )));
+    }
+    if let Err(msg) = validate_tool_allowlist(enabled_tools) {
+        return Err(Box::new(TenantPutProfileOutcome::fail(
+            profile_id.to_string(),
+            enabled_for_meta,
+            Some(profile_uuid),
+            StatusCode::BAD_REQUEST,
+            msg.clone(),
+            AuditError::new("bad_request", msg),
+            Some(name_for_meta.to_string()),
+        )));
+    }
+    Ok(())
+}
+
+struct TenantPutProfileStorePutInput<'a> {
+    tenant_id: &'a str,
+    profile_id: &'a str,
+    enabled_for_meta: bool,
+    profile_uuid: Uuid,
+    name_for_meta: &'a str,
+    description: Option<&'a str>,
+    enabled: bool,
+    allow_partial_upstreams: bool,
+    resolved_upstreams: &'a [String],
+    sources: &'a [String],
+    transforms: &'a TransformPipeline,
+    enabled_tools: &'a [String],
+    data_plane_auth: &'a DataPlaneAuthSettings,
+    data_plane_limits: &'a DataPlaneLimitsSettings,
+    tool_call_timeout_secs: Option<u64>,
+    tool_policies: &'a [ToolPolicy],
+    mcp: &'a McpProfileSettings,
+}
+
+async fn tenant_put_profile_store_put(
+    store: &dyn crate::store::AdminStore,
+    input: TenantPutProfileStorePutInput<'_>,
+) -> TenantPutProfileStep<()> {
     if let Err(e) = store
         .put_profile(
-            &profile_uuid.to_string(),
-            &tenant_id,
-            &name,
-            description.as_deref(),
-            req.enabled,
-            req.allow_partial_upstreams,
-            &resolved_upstreams,
-            &req.sources,
-            &req.transforms,
-            &enabled_tools,
-            data_plane_auth.mode,
-            data_plane_auth.accept_x_api_key,
-            data_plane_limits.rate_limit_enabled,
-            data_plane_limits.rate_limit_tool_calls_per_minute,
-            data_plane_limits.quota_enabled,
-            data_plane_limits.quota_tool_calls,
-            tool_call_timeout_secs,
-            &tool_policies,
-            &mcp,
+            input.profile_id,
+            input.tenant_id,
+            input.name_for_meta,
+            input.description,
+            input.enabled,
+            input.allow_partial_upstreams,
+            input.resolved_upstreams,
+            input.sources,
+            input.transforms,
+            input.enabled_tools,
+            input.data_plane_auth.mode,
+            input.data_plane_auth.accept_x_api_key,
+            input.data_plane_limits.rate_limit_enabled,
+            input.data_plane_limits.rate_limit_tool_calls_per_minute,
+            input.data_plane_limits.quota_enabled,
+            input.data_plane_limits.quota_tool_calls,
+            input.tool_call_timeout_secs,
+            input.tool_policies,
+            input.mcp,
         )
         .await
     {
         if e.to_string().contains("profiles_tenant_name_ci_uq") {
-            return (
+            return Err(Box::new(TenantPutProfileOutcome::fail(
+                input.profile_id.to_string(),
+                input.enabled_for_meta,
+                Some(input.profile_uuid),
                 StatusCode::CONFLICT,
                 "profile name already exists for this tenant (case-insensitive)",
-            )
-                .into_response();
+                AuditError::new(
+                    "conflict",
+                    "profile name already exists for this tenant (case-insensitive)",
+                ),
+                Some(input.name_for_meta.to_string()),
+            )));
         }
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        let msg = e.to_string();
+        return Err(Box::new(TenantPutProfileOutcome::fail(
+            input.profile_id.to_string(),
+            input.enabled_for_meta,
+            Some(input.profile_uuid),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            msg.clone(),
+            AuditError::new("internal_error", msg),
+            Some(input.name_for_meta.to_string()),
+        )));
     }
-
-    Json(CreateProfileResponse {
-        ok: true,
-        data_plane_path: format!("/{profile_id}/mcp"),
-        id: profile_id,
-    })
-    .into_response()
+    Ok(())
 }
 
 async fn delete_profile(
@@ -915,28 +1298,88 @@ async fn delete_profile(
     let Some(store) = &state.store else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
     };
+    let started = Instant::now();
+    let http_action = "tenant.profile_delete";
+    let http_method = "DELETE";
+    let http_route = "/tenant/v1/profiles/{profile_id}";
 
-    // UUIDv4 only, otherwise 404 (avoid enumeration patterns).
-    if Uuid::parse_str(&profile_id)
-        .ok()
-        .and_then(|u| (u.get_version() == Some(Version::Random)).then_some(u))
-        .is_none()
-    {
-        return (StatusCode::NOT_FOUND, "profile not found").into_response();
-    }
+    let tenant_id_for_audit = tenant_id.clone();
+    let profile_id_for_meta = profile_id.clone();
 
-    // Cross-tenant guard (404 on mismatch).
-    match store.get_profile(&profile_id).await {
-        Ok(Some(p)) if p.tenant_id == tenant_id => {}
-        Ok(_) => return (StatusCode::NOT_FOUND, "profile not found").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    let mut status = StatusCode::OK;
+    let mut ok = false;
+    let mut error: Option<AuditError> = None;
+    let mut profile_uuid: Option<Uuid> = None;
 
-    match store.delete_profile(&profile_id).await {
-        Ok(true) => Json(OkResponse { ok: true }).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "profile not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    let resp = 'resp: {
+        // UUIDv4 only, otherwise 404 (avoid enumeration patterns).
+        let pu = match Uuid::parse_str(&profile_id) {
+            Ok(u) if u.get_version() == Some(Version::Random) => u,
+            _ => {
+                status = StatusCode::NOT_FOUND;
+                error = Some(AuditError::new("not_found", "profile not found"));
+                break 'resp (status, "profile not found").into_response();
+            }
+        };
+        profile_uuid = Some(pu);
+
+        // Cross-tenant guard (404 on mismatch).
+        match store.get_profile(&profile_id).await {
+            Ok(Some(p)) if p.tenant_id == tenant_id => {}
+            Ok(_) => {
+                status = StatusCode::NOT_FOUND;
+                error = Some(AuditError::new("not_found", "profile not found"));
+                break 'resp (status, "profile not found").into_response();
+            }
+            Err(e) => {
+                status = StatusCode::INTERNAL_SERVER_ERROR;
+                let msg = e.to_string();
+                error = Some(AuditError::new("internal_error", msg.clone()));
+                break 'resp (status, msg).into_response();
+            }
+        }
+
+        match store.delete_profile(&profile_id).await {
+            Ok(true) => {
+                ok = true;
+                break 'resp Json(OkResponse { ok: true }).into_response();
+            }
+            Ok(false) => {
+                status = StatusCode::NOT_FOUND;
+                error = Some(AuditError::new("not_found", "profile not found"));
+                break 'resp (status, "profile not found").into_response();
+            }
+            Err(e) => {
+                status = StatusCode::INTERNAL_SERVER_ERROR;
+                let msg = e.to_string();
+                error = Some(AuditError::new("internal_error", msg.clone()));
+                break 'resp (status, msg).into_response();
+            }
+        }
+    };
+
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id_for_audit,
+            actor: AuditActor {
+                profile_id: profile_uuid,
+                ..AuditActor::default()
+            },
+            action: http_action,
+            http_method,
+            http_route,
+            status_code: i32::from(status.as_u16()),
+            ok,
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "profile_id": profile_id_for_meta,
+            }),
+            error,
+        }))
+        .await;
+
+    resp
 }
 
 #[derive(Debug, Serialize)]
@@ -1528,73 +1971,187 @@ async fn put_tool_source(
     let Some(store) = &state.store else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
     };
+    let started = Instant::now();
+    let outcome =
+        tenant_put_tool_source_inner(state.as_ref(), store.as_ref(), &tenant_id, &source_id, body)
+            .await;
 
-    if !is_valid_source_id(&source_id) {
-        return (
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id.clone(),
+            actor: AuditActor::default(),
+            action: "tenant.tool_source_put",
+            http_method: "PUT",
+            http_route: "/tenant/v1/tool-sources/{source_id}",
+            status_code: i32::from(outcome.status.as_u16()),
+            ok: outcome.status.is_success(),
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "tenant_id": tenant_id,
+                "source_id": source_id,
+                "kind": outcome.kind_for_meta,
+                "enabled": outcome.enabled_for_meta,
+            }),
+            error: outcome.error,
+        }))
+        .await;
+
+    outcome.resp
+}
+
+struct TenantPutToolSourceOutcome {
+    resp: axum::response::Response,
+    status: StatusCode,
+    error: Option<AuditError>,
+    kind_for_meta: Option<String>,
+    enabled_for_meta: Option<bool>,
+}
+
+impl TenantPutToolSourceOutcome {
+    fn fail(status: StatusCode, message: impl Into<String>, error: AuditError) -> Self {
+        let msg = message.into();
+        Self {
+            resp: (status, msg.clone()).into_response(),
+            status,
+            error: Some(error),
+            kind_for_meta: None,
+            enabled_for_meta: None,
+        }
+    }
+
+    fn fail_with_meta(
+        status: StatusCode,
+        message: impl Into<String>,
+        error: AuditError,
+        kind_for_meta: Option<String>,
+        enabled_for_meta: Option<bool>,
+    ) -> Self {
+        let msg = message.into();
+        Self {
+            resp: (status, msg.clone()).into_response(),
+            status,
+            error: Some(error),
+            kind_for_meta,
+            enabled_for_meta,
+        }
+    }
+
+    fn ok(kind_for_meta: Option<String>, enabled_for_meta: Option<bool>) -> Self {
+        Self {
+            resp: Json(OkResponse { ok: true }).into_response(),
+            status: StatusCode::OK,
+            error: None,
+            kind_for_meta,
+            enabled_for_meta,
+        }
+    }
+}
+
+async fn tenant_put_tool_source_validate_request(
+    state: &TenantState,
+    store: &dyn crate::store::AdminStore,
+    tenant_id: &str,
+    source_id: &str,
+) -> Result<(), TenantPutToolSourceOutcome> {
+    if !is_valid_source_id(source_id) {
+        return Err(TenantPutToolSourceOutcome::fail(
             StatusCode::BAD_REQUEST,
             "invalid source id (allowed: [a-zA-Z0-9_-], must not contain ':')",
-        )
-            .into_response();
+            AuditError::new("bad_request", "invalid source id"),
+        ));
     }
-    if state.shared_source_ids.contains(&source_id) {
-        return (
+    if state.shared_source_ids.contains(source_id) {
+        return Err(TenantPutToolSourceOutcome::fail(
             StatusCode::BAD_REQUEST,
             "source id collides with a shared catalog source id",
-        )
-            .into_response();
+            AuditError::new(
+                "bad_request",
+                "source id collides with a shared catalog source id",
+            ),
+        ));
     }
-    if store
-        .get_upstream(&source_id)
-        .await
-        .ok()
-        .flatten()
-        .is_some()
-    {
-        return (
+    if store.get_upstream(source_id).await.ok().flatten().is_some() {
+        return Err(TenantPutToolSourceOutcome::fail(
             StatusCode::BAD_REQUEST,
             "source id collides with an upstream id",
-        )
-            .into_response();
+            AuditError::new("bad_request", "source id collides with an upstream id"),
+        ));
+    }
+    match store.get_tenant(tenant_id).await {
+        Ok(Some(t)) if t.enabled => Ok(()),
+        Ok(_) => Err(TenantPutToolSourceOutcome::fail(
+            StatusCode::UNAUTHORIZED,
+            "invalid tenant",
+            AuditError::new("unauthorized", "invalid tenant"),
+        )),
+        Err(e) => {
+            let msg = e.to_string();
+            Err(TenantPutToolSourceOutcome::fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                msg.clone(),
+                AuditError::new("internal_error", msg),
+            ))
+        }
+    }
+}
+
+async fn tenant_put_tool_source_inner(
+    state: &TenantState,
+    store: &dyn crate::store::AdminStore,
+    tenant_id: &str,
+    source_id: &str,
+    body: PutToolSourceBody,
+) -> TenantPutToolSourceOutcome {
+    if let Err(outcome) =
+        tenant_put_tool_source_validate_request(state, store, tenant_id, source_id).await
+    {
+        return outcome;
     }
 
-    // Ensure tenant exists + enabled.
-    match store.get_tenant(&tenant_id).await {
-        Ok(Some(t)) if t.enabled => {}
-        Ok(_) => return (StatusCode::UNAUTHORIZED, "invalid tenant").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-
-    let (enabled, kind, spec) = match body {
-        PutToolSourceBody::Http { enabled, config } => (
-            enabled,
-            ToolSourceKind::Http,
-            match serde_json::to_value(&config) {
-                Ok(v) => v,
-                Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-                }
-            },
-        ),
+    let (enabled, kind, spec_res) = match body {
+        PutToolSourceBody::Http { enabled, config } => {
+            (enabled, ToolSourceKind::Http, serde_json::to_value(&config))
+        }
         PutToolSourceBody::Openapi { enabled, config } => (
             enabled,
             ToolSourceKind::Openapi,
-            match serde_json::to_value(&config) {
-                Ok(v) => v,
-                Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-                }
-            },
+            serde_json::to_value(&config),
         ),
     };
+    let kind_for_meta = Some(format!("{kind:?}"));
+    let enabled_for_meta = Some(enabled);
 
-    if let Err(e) = store
-        .put_tool_source(&tenant_id, &source_id, enabled, kind, spec)
+    let spec = match spec_res {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = e.to_string();
+            return TenantPutToolSourceOutcome::fail_with_meta(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                msg.clone(),
+                AuditError::new("internal_error", msg),
+                kind_for_meta,
+                enabled_for_meta,
+            );
+        }
+    };
+
+    match store
+        .put_tool_source(tenant_id, source_id, enabled, kind, spec)
         .await
     {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        Ok(()) => TenantPutToolSourceOutcome::ok(kind_for_meta, enabled_for_meta),
+        Err(e) => {
+            let msg = e.to_string();
+            TenantPutToolSourceOutcome::fail_with_meta(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                msg.clone(),
+                AuditError::new("internal_error", msg),
+                kind_for_meta,
+                enabled_for_meta,
+            )
+        }
     }
-
-    Json(OkResponse { ok: true }).into_response()
 }
 
 async fn delete_tool_source(
@@ -1609,12 +2166,53 @@ async fn delete_tool_source(
     let Some(store) = &state.store else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
     };
+    let started = Instant::now();
 
-    match store.delete_tool_source(&tenant_id, &source_id).await {
-        Ok(true) => Json(OkResponse { ok: true }).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "tool source not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    let tenant_id_for_audit = tenant_id.clone();
+    let source_id_for_meta = source_id.clone();
+    let (status, ok, error, resp) = match store.delete_tool_source(&tenant_id, &source_id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            true,
+            None,
+            Json(OkResponse { ok: true }).into_response(),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            false,
+            Some(AuditError::new("not_found", "tool source not found")),
+            (StatusCode::NOT_FOUND, "tool source not found").into_response(),
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                Some(AuditError::new("internal_error", msg.clone())),
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+            )
+        }
+    };
+
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id_for_audit,
+            actor: AuditActor::default(),
+            action: "tenant.tool_source_delete",
+            http_method: "DELETE",
+            http_route: "/tenant/v1/tool-sources/{source_id}",
+            status_code: i32::from(status.as_u16()),
+            ok,
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "source_id": source_id_for_meta,
+            }),
+            error,
+        }))
+        .await;
+
+    resp
 }
 
 async fn list_secrets(
@@ -1647,18 +2245,97 @@ async fn put_secret(
     let Some(store) = &state.store else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
     };
+    let started = Instant::now();
+    let tenant_id_for_audit = tenant_id.clone();
+    let name_for_meta = req.name.clone();
+    let value_len = req.value.len();
 
     if req.name.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "secret name is required").into_response();
+        let status = StatusCode::BAD_REQUEST;
+        let resp = (status, "secret name is required").into_response();
+        state
+            .audit
+            .record(crate::audit::http_event(HttpAuditEvent {
+                tenant_id: tenant_id_for_audit,
+                actor: AuditActor::default(),
+                action: "tenant.secret_put",
+                http_method: "PUT",
+                http_route: "/tenant/v1/secrets",
+                status_code: i32::from(status.as_u16()),
+                ok: false,
+                elapsed: started.elapsed(),
+                meta: serde_json::json!({
+                    "name": req.name,
+                    "value_len": value_len,
+                }),
+                error: Some(AuditError::new("bad_request", "secret name is required")),
+            }))
+            .await;
+        return resp;
     }
     if req.value.is_empty() {
-        return (StatusCode::BAD_REQUEST, "secret value is required").into_response();
+        let status = StatusCode::BAD_REQUEST;
+        let resp = (status, "secret value is required").into_response();
+        state
+            .audit
+            .record(crate::audit::http_event(HttpAuditEvent {
+                tenant_id: tenant_id_for_audit,
+                actor: AuditActor::default(),
+                action: "tenant.secret_put",
+                http_method: "PUT",
+                http_route: "/tenant/v1/secrets",
+                status_code: i32::from(status.as_u16()),
+                ok: false,
+                elapsed: started.elapsed(),
+                meta: serde_json::json!({
+                    "name": req.name,
+                    "value_len": value_len,
+                }),
+                error: Some(AuditError::new("bad_request", "secret value is required")),
+            }))
+            .await;
+        return resp;
     }
 
-    if let Err(e) = store.put_secret(&tenant_id, &req.name, &req.value).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
-    Json(OkResponse { ok: true }).into_response()
+    let (status, ok, error, resp) = match store.put_secret(&tenant_id, &req.name, &req.value).await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            true,
+            None,
+            Json(OkResponse { ok: true }).into_response(),
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                Some(AuditError::new("internal_error", msg.clone())),
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+            )
+        }
+    };
+
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id_for_audit,
+            actor: AuditActor::default(),
+            action: "tenant.secret_put",
+            http_method: "PUT",
+            http_route: "/tenant/v1/secrets",
+            status_code: i32::from(status.as_u16()),
+            ok,
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "name": name_for_meta,
+                "value_len": value_len,
+            }),
+            error,
+        }))
+        .await;
+
+    resp
 }
 
 async fn delete_secret(
@@ -1673,12 +2350,53 @@ async fn delete_secret(
     let Some(store) = &state.store else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
     };
+    let started = Instant::now();
 
-    match store.delete_secret(&tenant_id, &name).await {
-        Ok(true) => Json(OkResponse { ok: true }).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "secret not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    let tenant_id_for_audit = tenant_id.clone();
+    let name_for_meta = name.clone();
+    let (status, ok, error, resp) = match store.delete_secret(&tenant_id, &name).await {
+        Ok(true) => (
+            StatusCode::OK,
+            true,
+            None,
+            Json(OkResponse { ok: true }).into_response(),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            false,
+            Some(AuditError::new("not_found", "secret not found")),
+            (StatusCode::NOT_FOUND, "secret not found").into_response(),
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                Some(AuditError::new("internal_error", msg.clone())),
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+            )
+        }
+    };
+
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id_for_audit,
+            actor: AuditActor::default(),
+            action: "tenant.secret_delete",
+            http_method: "DELETE",
+            http_route: "/tenant/v1/secrets/{name}",
+            status_code: i32::from(status.as_u16()),
+            ok,
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "name": name_for_meta,
+            }),
+            error,
+        }))
+        .await;
+
+    resp
 }
 
 #[derive(Debug, Serialize)]
@@ -1739,37 +2457,110 @@ async fn create_api_key(
     let Some(store) = &state.store else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
     };
+    let started = Instant::now();
+    let outcome = tenant_create_api_key_inner(store.as_ref(), &tenant_id, req).await;
+
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id.clone(),
+            actor: AuditActor {
+                profile_id: outcome.profile_uuid,
+                api_key_id: outcome.api_key_uuid,
+                ..AuditActor::default()
+            },
+            action: "tenant.api_key_create",
+            http_method: "POST",
+            http_route: "/tenant/v1/api-keys",
+            status_code: i32::from(outcome.status.as_u16()),
+            ok: outcome.status.is_success(),
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "api_key_id": outcome.api_key_id_for_meta,
+                "name": outcome.name_for_meta,
+                "prefix": outcome.prefix_for_meta,
+                "profile_id": outcome.profile_id_for_meta,
+            }),
+            error: outcome.error,
+        }))
+        .await;
+
+    outcome.resp
+}
+
+struct TenantCreateApiKeyOutcome {
+    resp: axum::response::Response,
+    status: StatusCode,
+    error: Option<AuditError>,
+    profile_uuid: Option<Uuid>,
+    api_key_uuid: Option<Uuid>,
+    api_key_id_for_meta: Option<String>,
+    name_for_meta: Option<String>,
+    prefix_for_meta: Option<String>,
+    profile_id_for_meta: Option<String>,
+}
+
+impl TenantCreateApiKeyOutcome {
+    fn fail(
+        status: StatusCode,
+        message: impl Into<String>,
+        error: AuditError,
+        profile_id_for_meta: Option<String>,
+        profile_uuid: Option<Uuid>,
+    ) -> Self {
+        let msg = message.into();
+        Self {
+            resp: (status, msg.clone()).into_response(),
+            status,
+            error: Some(error),
+            profile_uuid,
+            api_key_uuid: None,
+            api_key_id_for_meta: None,
+            name_for_meta: None,
+            prefix_for_meta: None,
+            profile_id_for_meta,
+        }
+    }
+}
+
+async fn tenant_create_api_key_inner(
+    store: &dyn crate::store::AdminStore,
+    tenant_id: &str,
+    req: CreateApiKeyRequest,
+) -> TenantCreateApiKeyOutcome {
+    let profile_uuid = req
+        .profile_id
+        .as_deref()
+        .and_then(|p| Uuid::parse_str(p).ok());
+    let profile_id_for_meta = req.profile_id.clone();
 
     let name = req.name.as_deref().unwrap_or("default").trim().to_string();
     if name.is_empty() {
-        return (StatusCode::BAD_REQUEST, "name is required").into_response();
+        return TenantCreateApiKeyOutcome::fail(
+            StatusCode::BAD_REQUEST,
+            "name is required",
+            AuditError::new("bad_request", "name is required"),
+            profile_id_for_meta,
+            profile_uuid,
+        );
     }
 
-    if let Some(profile_id) = req.profile_id.as_deref() {
-        // UUIDv4 only, otherwise 404 (avoid enumeration patterns).
-        if Uuid::parse_str(profile_id)
-            .ok()
-            .and_then(|u| (u.get_version() == Some(Version::Random)).then_some(u))
-            .is_none()
-        {
-            return (StatusCode::NOT_FOUND, "profile not found").into_response();
-        }
-
-        match store.get_profile(profile_id).await {
-            Ok(Some(p)) if p.tenant_id == tenant_id && p.enabled => {}
-            Ok(_) => return (StatusCode::NOT_FOUND, "profile not found").into_response(),
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        }
+    if let Some(profile_id) = req.profile_id.as_deref()
+        && let Err(outcome) =
+            tenant_validate_profile_for_api_key(store, tenant_id, profile_id, profile_uuid).await
+    {
+        return outcome;
     }
 
     let api_key_id = Uuid::new_v4().to_string();
+    let api_key_uuid = Uuid::parse_str(&api_key_id).ok();
     let secret = generate_api_key_secret();
     let prefix = api_key_prefix(&secret);
     let secret_hash = hex::encode(sha2::Sha256::digest(secret.as_bytes()));
 
     if let Err(e) = store
         .put_api_key(
-            &tenant_id,
+            tenant_id,
             &api_key_id,
             req.profile_id.as_deref(),
             &name,
@@ -1778,17 +2569,81 @@ async fn create_api_key(
         )
         .await
     {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        let msg = e.to_string();
+        return TenantCreateApiKeyOutcome {
+            resp: (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()).into_response(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: Some(AuditError::new("internal_error", msg)),
+            profile_uuid,
+            api_key_uuid,
+            api_key_id_for_meta: Some(api_key_id),
+            name_for_meta: Some(name),
+            prefix_for_meta: Some(prefix),
+            profile_id_for_meta,
+        };
     }
 
-    Json(CreateApiKeyResponse {
-        ok: true,
-        id: api_key_id,
-        secret,
-        prefix,
-        profile_id: req.profile_id,
-    })
-    .into_response()
+    TenantCreateApiKeyOutcome {
+        resp: Json(CreateApiKeyResponse {
+            ok: true,
+            id: api_key_id.clone(),
+            secret,
+            prefix: prefix.clone(),
+            profile_id: req.profile_id,
+        })
+        .into_response(),
+        status: StatusCode::OK,
+        error: None,
+        profile_uuid,
+        api_key_uuid,
+        api_key_id_for_meta: Some(api_key_id),
+        name_for_meta: Some(name),
+        prefix_for_meta: Some(prefix),
+        profile_id_for_meta,
+    }
+}
+
+async fn tenant_validate_profile_for_api_key(
+    store: &dyn crate::store::AdminStore,
+    tenant_id: &str,
+    profile_id: &str,
+    profile_uuid: Option<Uuid>,
+) -> Result<(), TenantCreateApiKeyOutcome> {
+    // UUIDv4 only, otherwise 404 (avoid enumeration patterns).
+    if Uuid::parse_str(profile_id)
+        .ok()
+        .and_then(|u| (u.get_version() == Some(Version::Random)).then_some(u))
+        .is_none()
+    {
+        return Err(TenantCreateApiKeyOutcome::fail(
+            StatusCode::NOT_FOUND,
+            "profile not found",
+            AuditError::new("not_found", "profile not found"),
+            Some(profile_id.to_string()),
+            profile_uuid,
+        ));
+    }
+
+    match store.get_profile(profile_id).await {
+        Ok(Some(p)) if p.tenant_id == tenant_id && p.enabled => Ok(()),
+        Ok(_) => Err(TenantCreateApiKeyOutcome::fail(
+            StatusCode::NOT_FOUND,
+            "profile not found",
+            AuditError::new("not_found", "profile not found"),
+            Some(profile_id.to_string()),
+            profile_uuid,
+        )),
+        Err(e) => {
+            let msg = e.to_string();
+            Err(TenantCreateApiKeyOutcome::fail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                msg.clone(),
+                AuditError::new("internal_error", msg),
+                Some(profile_id.to_string()),
+                profile_uuid,
+            ))
+        }
+    }
 }
 
 async fn revoke_api_key(
@@ -1803,12 +2658,57 @@ async fn revoke_api_key(
     let Some(store) = &state.store else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Tenant store unavailable").into_response();
     };
+    let started = Instant::now();
 
-    match store.revoke_api_key(&tenant_id, &api_key_id).await {
-        Ok(true) => Json(OkResponse { ok: true }).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, "api key not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    let tenant_id_for_audit = tenant_id.clone();
+    let api_key_uuid = Uuid::parse_str(&api_key_id).ok();
+    let api_key_id_for_meta = api_key_id.clone();
+    let (status, ok, error, resp) = match store.revoke_api_key(&tenant_id, &api_key_id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            true,
+            None,
+            Json(OkResponse { ok: true }).into_response(),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            false,
+            Some(AuditError::new("not_found", "api key not found")),
+            (StatusCode::NOT_FOUND, "api key not found").into_response(),
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                false,
+                Some(AuditError::new("internal_error", msg.clone())),
+                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
+            )
+        }
+    };
+
+    state
+        .audit
+        .record(crate::audit::http_event(HttpAuditEvent {
+            tenant_id: tenant_id_for_audit,
+            actor: AuditActor {
+                api_key_id: api_key_uuid,
+                ..AuditActor::default()
+            },
+            action: "tenant.api_key_revoke",
+            http_method: "DELETE",
+            http_route: "/tenant/v1/api-keys/{api_key_id}",
+            status_code: i32::from(status.as_u16()),
+            ok,
+            elapsed: started.elapsed(),
+            meta: serde_json::json!({
+                "api_key_id": api_key_id_for_meta,
+            }),
+            error,
+        }))
+        .await;
+
+    resp
 }
 
 fn generate_api_key_secret() -> String {
