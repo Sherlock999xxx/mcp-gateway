@@ -107,11 +107,13 @@ test-integration: test-integration-adapter test-integration-gateway
 
 ## Run adapter integration tests only (requires Docker)
 test-integration-adapter:
-	cargo test -p unrelated-mcp-adapter --tests -- --nocapture --test-threads=1
+	cargo test -p unrelated-mcp-adapter --tests -- --nocapture --test-threads=1 && \
+	cargo test -p unrelated-mcp-adapter --tests -- --ignored --nocapture --test-threads=1
 
 ## Run gateway integration tests only (requires Docker)
 test-integration-gateway:
-	cargo test -p unrelated-mcp-gateway --tests -- --nocapture --test-threads=1
+	cargo test -p unrelated-mcp-gateway --tests -- --nocapture --test-threads=1 && \
+	cargo test -p unrelated-mcp-gateway --tests -- --ignored --nocapture --test-threads=1
 
 # =============================================================================
 # Code Quality Targets
