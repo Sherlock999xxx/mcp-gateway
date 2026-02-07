@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::serde_helpers::default_true;
 use crate::store::McpProfileSettings;
 use crate::tool_policy::ToolPolicy;
 use unrelated_http_tools::config as http_tools;
@@ -134,10 +135,6 @@ pub enum SharedSourceConfig {
         #[serde(flatten)]
         config: openapi_tools::ApiServerConfig,
     },
-}
-
-const fn default_true() -> bool {
-    true
 }
 
 #[cfg(test)]

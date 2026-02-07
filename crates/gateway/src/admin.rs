@@ -1,12 +1,14 @@
 use crate::audit::{AuditActor, AuditError, HttpAuditEvent};
 use crate::profile_http::{
     DataPlaneAuthSettings, DataPlaneLimitsSettings, NullableString, NullableU64,
-    default_data_plane_auth_mode, default_true, resolve_nullable_u64, validate_tool_allowlist,
+    default_data_plane_auth_mode, resolve_nullable_u64, validate_tool_allowlist,
     validate_tool_timeout_and_policies,
 };
+use crate::serde_helpers::default_true;
 use crate::store::{
     AdminProfile, AdminStore, AdminTenant, AdminUpstream, DataPlaneAuthMode, McpProfileSettings,
-    OidcPrincipalBinding, TenantSecretMetadata, ToolSourceKind, UpstreamEndpoint,
+    OidcPrincipalBinding, PutProfileDataPlaneAuth, PutProfileFlags, PutProfileInput,
+    PutProfileLimits, TenantSecretMetadata, ToolSourceKind, UpstreamEndpoint,
 };
 use crate::tenant::{IssueTenantTokenRequest, IssueTenantTokenResponse, now_unix_secs};
 use crate::tenant_token::{TenantSigner, TenantTokenPayloadV1};
@@ -180,6 +182,7 @@ async fn bootstrap_tenant_status(
     .into_response()
 }
 
+#[allow(clippy::too_many_lines)] // TODO: refactor this to be more readable.
 async fn bootstrap_tenant(
     Extension(state): Extension<Arc<AdminState>>,
     Json(req): Json<BootstrapTenantRequest>,
@@ -225,28 +228,35 @@ async fn bootstrap_tenant(
         let description = req.profile_description.as_deref();
 
         // Create an empty (no upstreams/sources) profile; UI can attach sources later.
+        let (transforms, mcp) = (TransformPipeline::default(), McpProfileSettings::default());
         if let Err(e) = store
-            .put_profile(
-                &pid,
+            .put_profile(PutProfileInput {
+                profile_id: &pid,
                 tenant_id,
                 name,
                 description,
-                true, // enabled
-                true, // allow_partial_upstreams
-                &[],  // upstream_ids
-                &[],  // source_ids
-                &TransformPipeline::default(),
-                &[],
-                DataPlaneAuthMode::ApiKeyInitializeOnly,
-                true,  // accept_x_api_key
-                false, // rate_limit_enabled
-                None,
-                false, // quota_enabled
-                None,
-                None, // tool_call_timeout_secs
-                &[],
-                &McpProfileSettings::default(),
-            )
+                flags: PutProfileFlags {
+                    enabled: true,
+                    allow_partial_upstreams: true,
+                },
+                upstream_ids: &[],
+                source_ids: &[],
+                transforms: &transforms,
+                enabled_tools: &[],
+                data_plane_auth: PutProfileDataPlaneAuth {
+                    mode: DataPlaneAuthMode::ApiKeyInitializeOnly,
+                    accept_x_api_key: true,
+                },
+                limits: PutProfileLimits {
+                    rate_limit_enabled: false,
+                    rate_limit_tool_calls_per_minute: None,
+                    quota_enabled: false,
+                    quota_tool_calls: None,
+                },
+                tool_call_timeout_secs: None,
+                tool_policies: &[],
+                mcp: &mcp,
+            })
             .await
         {
             if e.to_string().contains("profiles_tenant_name_ci_uq") {
@@ -994,27 +1004,35 @@ async fn put_profile_in_store(
     input: PutProfileStoreInputs<'_>,
 ) -> Result<(), BoxResponse> {
     store
-        .put_profile(
-            input.profile_id,
-            &req.tenant_id,
-            input.name,
-            input.description,
-            req.enabled,
-            req.allow_partial_upstreams,
-            &req.upstreams,
-            &req.sources,
-            &req.transforms,
-            input.enabled_tools,
-            input.data_plane_auth.mode,
-            input.data_plane_auth.accept_x_api_key,
-            input.data_plane_limits.rate_limit_enabled,
-            input.data_plane_limits.rate_limit_tool_calls_per_minute,
-            input.data_plane_limits.quota_enabled,
-            input.data_plane_limits.quota_tool_calls,
-            input.tool_call_timeout_secs,
-            input.tool_policies,
-            input.mcp,
-        )
+        .put_profile(PutProfileInput {
+            profile_id: input.profile_id,
+            tenant_id: &req.tenant_id,
+            name: input.name,
+            description: input.description,
+            flags: PutProfileFlags {
+                enabled: req.enabled,
+                allow_partial_upstreams: req.allow_partial_upstreams,
+            },
+            upstream_ids: &req.upstreams,
+            source_ids: &req.sources,
+            transforms: &req.transforms,
+            enabled_tools: input.enabled_tools,
+            data_plane_auth: PutProfileDataPlaneAuth {
+                mode: input.data_plane_auth.mode,
+                accept_x_api_key: input.data_plane_auth.accept_x_api_key,
+            },
+            limits: PutProfileLimits {
+                rate_limit_enabled: input.data_plane_limits.rate_limit_enabled,
+                rate_limit_tool_calls_per_minute: input
+                    .data_plane_limits
+                    .rate_limit_tool_calls_per_minute,
+                quota_enabled: input.data_plane_limits.quota_enabled,
+                quota_tool_calls: input.data_plane_limits.quota_tool_calls,
+            },
+            tool_call_timeout_secs: input.tool_call_timeout_secs,
+            tool_policies: input.tool_policies,
+            mcp: input.mcp,
+        })
         .await
         .map_err(|e| {
             if e.to_string().contains("profiles_tenant_name_ci_uq") {

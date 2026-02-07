@@ -1,4 +1,5 @@
 use crate::config::{GatewayConfig, Mode1AuthMode, ProfileConfig, UpstreamConfig};
+use crate::serde_helpers::default_true;
 use crate::tool_policy::ToolPolicy;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,117 @@ pub struct McpProfileSettings {
     /// Namespacing / collision-handling policy for IDs in the merged SSE stream.
     #[serde(default)]
     pub namespacing: McpNamespacing,
+    /// Security policy for upstream interactions and proxying.
+    #[serde(default)]
+    pub security: McpSecuritySettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpSecuritySettings {
+    /// If true, proxied upstream server→client request IDs are signed with a per-session key and
+    /// downstream responses must verify (mitigates forged responses from malicious downstreams).
+    #[serde(default = "default_true")]
+    pub signed_proxied_request_ids: bool,
+
+    /// Default upstream policy applied when no per-upstream override exists.
+    #[serde(default)]
+    pub upstream_default: UpstreamSecurityPolicy,
+
+    /// Per-upstream overrides keyed by upstream id.
+    #[serde(default)]
+    pub upstream_overrides: std::collections::HashMap<String, UpstreamSecurityPolicy>,
+}
+
+impl Default for McpSecuritySettings {
+    fn default() -> Self {
+        Self {
+            signed_proxied_request_ids: true,
+            upstream_default: UpstreamSecurityPolicy::default(),
+            upstream_overrides: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl McpSecuritySettings {
+    pub fn effective_upstream_policy(&self, upstream_id: &str) -> UpstreamSecurityPolicy {
+        self.upstream_overrides
+            .get(upstream_id)
+            .cloned()
+            .unwrap_or_else(|| self.upstream_default.clone())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamSecurityPolicy {
+    /// Controls what client capabilities the Gateway advertises upstream during `initialize`.
+    #[serde(default)]
+    pub client_capabilities_mode: UpstreamClientCapabilitiesMode,
+
+    /// For `client_capabilities_mode = allowlist`, only these top-level capability keys are
+    /// forwarded (e.g. `sampling`, `roots`, `elicitation`). Unknown keys are ignored.
+    #[serde(default)]
+    pub client_capabilities_allow: Vec<String>,
+
+    /// Controls which upstream server→client JSON-RPC requests are forwarded to the downstream
+    /// client (e.g. `sampling/createMessage`, `roots/list`, `elicitation/create`).
+    #[serde(default)]
+    pub server_requests: McpServerRequestFilter,
+
+    /// If true, replace downstream `clientInfo` before sending `initialize` upstream (privacy).
+    #[serde(default)]
+    pub rewrite_client_info: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum UpstreamClientCapabilitiesMode {
+    #[default]
+    Passthrough,
+    Strip,
+    Allowlist,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpPolicyAction {
+    #[default]
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerRequestFilter {
+    #[serde(default)]
+    pub default_action: McpPolicyAction,
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+impl Default for McpServerRequestFilter {
+    fn default() -> Self {
+        Self {
+            default_action: McpPolicyAction::Allow,
+            allow: Vec::new(),
+            deny: Vec::new(),
+        }
+    }
+}
+
+impl McpServerRequestFilter {
+    pub fn allows(&self, method: &str) -> bool {
+        if self.deny.iter().any(|m| m == method) {
+            return false;
+        }
+        if self.allow.iter().any(|m| m == method) {
+            return true;
+        }
+        matches!(self.default_action, McpPolicyAction::Allow)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -153,7 +265,10 @@ impl McpCapabilitiesPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpCapabilitiesPolicy, McpCapability};
+    use super::{
+        McpCapabilitiesPolicy, McpCapability, McpPolicyAction, McpProfileSettings,
+        UpstreamClientCapabilitiesMode,
+    };
 
     #[test]
     fn mcp_caps_defaults_all_on() {
@@ -189,6 +304,31 @@ mod tests {
         }
         .effective();
         assert!(!caps.logging());
+    }
+
+    #[test]
+    fn mcp_security_defaults_are_nonbreaking_and_harden_proxying() {
+        let mcp = McpProfileSettings::default();
+        assert!(mcp.security.signed_proxied_request_ids);
+        assert!(matches!(
+            mcp.security.upstream_default.client_capabilities_mode,
+            UpstreamClientCapabilitiesMode::Passthrough
+        ));
+        assert!(matches!(
+            mcp.security.upstream_default.server_requests.default_action,
+            McpPolicyAction::Allow
+        ));
+        assert!(
+            mcp.security
+                .upstream_default
+                .server_requests
+                .allows("sampling/createMessage")
+        );
+
+        // Serde roundtrip (Mode 3 JSONB / Mode 1 YAML both rely on this).
+        let v = serde_json::to_value(&mcp).expect("serialize mcp settings");
+        let back: McpProfileSettings = serde_json::from_value(v).expect("deserialize mcp settings");
+        assert!(back.security.signed_proxied_request_ids);
     }
 
     #[tokio::test]
@@ -684,29 +824,7 @@ pub trait AdminStore: Send + Sync {
     async fn list_profiles(&self) -> anyhow::Result<Vec<AdminProfile>>;
     async fn get_profile(&self, profile_id: &str) -> anyhow::Result<Option<AdminProfile>>;
     async fn delete_profile(&self, profile_id: &str) -> anyhow::Result<bool>;
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    async fn put_profile(
-        &self,
-        profile_id: &str,
-        tenant_id: &str,
-        name: &str,
-        description: Option<&str>,
-        enabled: bool,
-        allow_partial_upstreams: bool,
-        upstream_ids: &[String],
-        source_ids: &[String],
-        transforms: &TransformPipeline,
-        enabled_tools: &[String],
-        data_plane_auth_mode: DataPlaneAuthMode,
-        accept_x_api_key: bool,
-        rate_limit_enabled: bool,
-        rate_limit_tool_calls_per_minute: Option<i64>,
-        quota_enabled: bool,
-        quota_tool_calls: Option<i64>,
-        tool_call_timeout_secs: Option<u64>,
-        tool_policies: &[ToolPolicy],
-        mcp: &McpProfileSettings,
-    ) -> anyhow::Result<()>;
+    async fn put_profile(&self, input: PutProfileInput<'_>) -> anyhow::Result<()>;
 
     // Mode 3 overlay: tenant-owned tool sources.
     async fn list_tool_sources(&self, tenant_id: &str) -> anyhow::Result<Vec<TenantToolSource>>;
@@ -812,6 +930,44 @@ pub trait AdminStore: Send + Sync {
     ///
     /// Returns the number of rows deleted.
     async fn cleanup_audit_events_for_tenant(&self, tenant_id: &str) -> anyhow::Result<u64>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PutProfileFlags {
+    pub enabled: bool,
+    pub allow_partial_upstreams: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PutProfileDataPlaneAuth {
+    pub mode: DataPlaneAuthMode,
+    pub accept_x_api_key: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PutProfileLimits {
+    pub rate_limit_enabled: bool,
+    pub rate_limit_tool_calls_per_minute: Option<i64>,
+    pub quota_enabled: bool,
+    pub quota_tool_calls: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PutProfileInput<'a> {
+    pub profile_id: &'a str,
+    pub tenant_id: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub flags: PutProfileFlags,
+    pub upstream_ids: &'a [String],
+    pub source_ids: &'a [String],
+    pub transforms: &'a TransformPipeline,
+    pub enabled_tools: &'a [String],
+    pub data_plane_auth: PutProfileDataPlaneAuth,
+    pub limits: PutProfileLimits,
+    pub tool_call_timeout_secs: Option<u64>,
+    pub tool_policies: &'a [ToolPolicy],
+    pub mcp: &'a McpProfileSettings,
 }
 
 /// In-memory store backed by a static config file (Mode 1).

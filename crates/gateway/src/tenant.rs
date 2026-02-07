@@ -1,18 +1,20 @@
 use crate::audit::{AuditActor, AuditError, HttpAuditEvent};
 use crate::profile_http::{
     DataPlaneAuthSettings, DataPlaneLimitsSettings, NullableString, NullableU64,
-    default_data_plane_auth_mode, default_true, resolve_nullable_u64, validate_tool_allowlist,
+    default_data_plane_auth_mode, resolve_nullable_u64, validate_tool_allowlist,
     validate_tool_timeout_and_policies,
 };
+use crate::serde_helpers::default_true;
 use crate::store::{
     AdminProfile, AdminStore, AdminUpstream, ApiKeyMetadata, DataPlaneAuthMode, McpProfileSettings,
+    PutProfileDataPlaneAuth, PutProfileFlags, PutProfileInput, PutProfileLimits,
     TenantSecretMetadata, ToolSourceKind, UpstreamEndpoint,
 };
 use crate::tenant_token::TenantSigner;
 use crate::tool_policy::ToolPolicy;
 use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get};
 use axum::{Json, Router};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -689,13 +691,28 @@ async fn get_profile(
     }
 }
 
+async fn put_profile_handle_name_conflict(
+    store: &dyn AdminStore,
+    input: PutProfileInput<'_>,
+) -> Result<(), Response> {
+    store.put_profile(input).await.map_err(|e| {
+        if e.to_string().contains("profiles_tenant_name_ci_uq") {
+            (
+                StatusCode::CONFLICT,
+                "profile name already exists for this tenant (case-insensitive)",
+            )
+                .into_response()
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+        }
+    })
+}
+
 async fn create_profile(
     axum::Extension(state): axum::Extension<Arc<TenantState>>,
     headers: HeaderMap,
     Json(req): Json<CreateProfileRequest>,
 ) -> impl IntoResponse {
-    const OIDC_NOT_CONFIGURED_MSG: &str = "JWT/OIDC is unavailable because OIDC is not configured on the Gateway (missing UNRELATED_GATEWAY_OIDC_ISSUER). Configure OIDC or choose a different mode.";
-
     let tenant_id = match authn(&headers, &state.signer) {
         Ok(t) => t,
         Err(resp) => return resp.into_response(),
@@ -746,8 +763,7 @@ async fn create_profile(
 
     // Tool call timeouts + per-tool policies (timeouts + retry policy).
     let tool_call_timeout_secs = req.tool_call_timeout_secs;
-    let tool_policies = req.tool_policies.clone();
-    let mcp = req.mcp.clone();
+    let (tool_policies, mcp) = (req.tool_policies.clone(), req.mcp.clone());
     if let Err(msg) = validate_tool_timeout_and_policies(tool_call_timeout_secs, &tool_policies) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
@@ -755,38 +771,40 @@ async fn create_profile(
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
 
-    if let Err(e) = store
-        .put_profile(
-            &profile_id,
-            &tenant_id,
-            &req.name,
-            req.description.as_deref(),
-            req.enabled,
-            req.allow_partial_upstreams,
-            &resolved_upstreams,
-            &req.sources,
-            &req.transforms,
-            &enabled_tools,
-            data_plane_auth.mode,
-            data_plane_auth.accept_x_api_key,
-            data_plane_limits.rate_limit_enabled,
-            data_plane_limits.rate_limit_tool_calls_per_minute,
-            data_plane_limits.quota_enabled,
-            data_plane_limits.quota_tool_calls,
+    if let Err(resp) = put_profile_handle_name_conflict(
+        store.as_ref(),
+        PutProfileInput {
+            profile_id: &profile_id,
+            tenant_id: &tenant_id,
+            name: &req.name,
+            description: req.description.as_deref(),
+            flags: PutProfileFlags {
+                enabled: req.enabled,
+                allow_partial_upstreams: req.allow_partial_upstreams,
+            },
+            upstream_ids: &resolved_upstreams,
+            source_ids: &req.sources,
+            transforms: &req.transforms,
+            enabled_tools: &enabled_tools,
+            data_plane_auth: PutProfileDataPlaneAuth {
+                mode: data_plane_auth.mode,
+                accept_x_api_key: data_plane_auth.accept_x_api_key,
+            },
+            limits: PutProfileLimits {
+                rate_limit_enabled: data_plane_limits.rate_limit_enabled,
+                rate_limit_tool_calls_per_minute: data_plane_limits
+                    .rate_limit_tool_calls_per_minute,
+                quota_enabled: data_plane_limits.quota_enabled,
+                quota_tool_calls: data_plane_limits.quota_tool_calls,
+            },
             tool_call_timeout_secs,
-            &tool_policies,
-            &mcp,
-        )
-        .await
+            tool_policies: &tool_policies,
+            mcp: &mcp,
+        },
+    )
+    .await
     {
-        if e.to_string().contains("profiles_tenant_name_ci_uq") {
-            return (
-                StatusCode::CONFLICT,
-                "profile name already exists for this tenant (case-insensitive)",
-            )
-                .into_response();
-        }
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        return resp;
     }
 
     (
@@ -1252,27 +1270,35 @@ async fn tenant_put_profile_store_put(
     input: TenantPutProfileStorePutInput<'_>,
 ) -> TenantPutProfileStep<()> {
     if let Err(e) = store
-        .put_profile(
-            input.profile_id,
-            input.tenant_id,
-            input.name_for_meta,
-            input.description,
-            input.enabled,
-            input.allow_partial_upstreams,
-            input.resolved_upstreams,
-            input.sources,
-            input.transforms,
-            input.enabled_tools,
-            input.data_plane_auth.mode,
-            input.data_plane_auth.accept_x_api_key,
-            input.data_plane_limits.rate_limit_enabled,
-            input.data_plane_limits.rate_limit_tool_calls_per_minute,
-            input.data_plane_limits.quota_enabled,
-            input.data_plane_limits.quota_tool_calls,
-            input.tool_call_timeout_secs,
-            input.tool_policies,
-            input.mcp,
-        )
+        .put_profile(PutProfileInput {
+            profile_id: input.profile_id,
+            tenant_id: input.tenant_id,
+            name: input.name_for_meta,
+            description: input.description,
+            flags: PutProfileFlags {
+                enabled: input.enabled,
+                allow_partial_upstreams: input.allow_partial_upstreams,
+            },
+            upstream_ids: input.resolved_upstreams,
+            source_ids: input.sources,
+            transforms: input.transforms,
+            enabled_tools: input.enabled_tools,
+            data_plane_auth: PutProfileDataPlaneAuth {
+                mode: input.data_plane_auth.mode,
+                accept_x_api_key: input.data_plane_auth.accept_x_api_key,
+            },
+            limits: PutProfileLimits {
+                rate_limit_enabled: input.data_plane_limits.rate_limit_enabled,
+                rate_limit_tool_calls_per_minute: input
+                    .data_plane_limits
+                    .rate_limit_tool_calls_per_minute,
+                quota_enabled: input.data_plane_limits.quota_enabled,
+                quota_tool_calls: input.data_plane_limits.quota_tool_calls,
+            },
+            tool_call_timeout_secs: input.tool_call_timeout_secs,
+            tool_policies: input.tool_policies,
+            mcp: input.mcp,
+        })
         .await
     {
         if e.to_string().contains("profiles_tenant_name_ci_uq") {

@@ -23,6 +23,7 @@ mod pg_invalidation;
 mod pg_store;
 mod profile_http;
 mod secrets_crypto;
+mod serde_helpers;
 mod session_token;
 mod store;
 mod tenant;

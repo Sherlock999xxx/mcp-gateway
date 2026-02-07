@@ -1,3 +1,4 @@
+use crate::serde_helpers::default_true;
 use crate::store::DataPlaneAuthMode;
 use crate::timeouts::tool_call_timeout_max_secs;
 use crate::tool_policy::ToolPolicy;
@@ -23,10 +24,6 @@ pub(crate) fn resolve_nullable_u64(req: Option<NullableU64>, existing: Option<u6
         Some(NullableU64::Null) => None,
         Some(NullableU64::Value(v)) => Some(v),
     }
-}
-
-pub(crate) const fn default_true() -> bool {
-    true
 }
 
 pub(crate) const fn default_data_plane_auth_mode() -> DataPlaneAuthMode {
