@@ -65,6 +65,48 @@ Controls how the Gateway namespaces IDs so aggregated upstream streams don’t c
 - `upstream-slash` (default): `{upstream_id}/{upstream_event_id}`
 - `none`: do not prefix upstream SSE event IDs (may break per-upstream resume via `Last-Event-ID`)
 
+## `mcp.security` (upstream trust + proxy hardening)
+
+These settings control how the Gateway behaves when interacting with **upstream MCP servers** and
+how it hardens certain proxy mechanics against malicious clients.
+
+Notes:
+
+- This is **per-profile**, but supports **per-upstream overrides** (because not all upstreams are equally trusted).
+- Defaults are intentionally **non-breaking** (preserve current behavior), but enable operators to tighten policy.
+
+### `mcp.security.signedProxiedRequestIds`
+
+If `true` (default), the Gateway will sign proxied upstream server→client request IDs with a
+per-session key and reject downstream responses whose IDs do not verify (mitigates forged responses
+from malicious downstream clients).
+
+### `mcp.security.upstreamDefault` / `mcp.security.upstreamOverrides`
+
+Shape:
+
+- `mcp.security.upstreamDefault`: default policy applied to all upstreams unless overridden
+- `mcp.security.upstreamOverrides`: object keyed by upstream id → policy override
+
+Each upstream policy supports:
+
+- `clientCapabilitiesMode`: how the Gateway advertises **client capabilities** upstream during `initialize`
+  - `passthrough` (default): forward downstream client capabilities unchanged
+  - `strip`: send empty client capabilities upstream
+  - `allowlist`: forward only the keys in `clientCapabilitiesAllow`
+- `clientCapabilitiesAllow`: list of top-level capability keys (e.g. `sampling`, `roots`, `elicitation`)
+- `rewriteClientInfo`: if `true`, replace downstream `clientInfo` before sending `initialize` upstream (privacy)
+- `serverRequests`: filter for upstream **server→client JSON-RPC requests** forwarded over SSE
+  - `defaultAction`: `allow` (default) or `deny`
+  - `allow`: allowlist of method strings
+  - `deny`: denylist of method strings
+
+Examples of request methods:
+
+- `sampling/createMessage`
+- `roots/list`
+- `elicitation/create`
+
 ## Mode 1 example
 
 ```yaml
@@ -80,4 +122,21 @@ profiles:
       namespacing:
         requestId: opaque
         sseEventId: upstream-slash
+      security:
+        signedProxiedRequestIds: true
+        upstreamDefault:
+          clientCapabilitiesMode: passthrough
+          rewriteClientInfo: false
+          serverRequests:
+            defaultAction: allow
+            allow: []
+            deny: []
+        upstreamOverrides:
+          untrusted-upstream-1:
+            clientCapabilitiesMode: strip
+            rewriteClientInfo: true
+            serverRequests:
+              defaultAction: deny
+              allow: []
+              deny: []
 ```
