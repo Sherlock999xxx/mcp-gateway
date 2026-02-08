@@ -120,6 +120,8 @@ pub fn spawn_gateway(
         .arg("--log-level")
         .arg("info")
         .env("UNRELATED_GATEWAY_SESSION_SECRET", session_secret)
+        // Integration tests run mock upstreams on loopback.
+        .env("UNRELATED_GATEWAY_OUTBOUND_ALLOW_PRIVATE_NETWORKS", "1")
         // Mode 3 requires tenant secret encryption keys.
         .env(
             "UNRELATED_GATEWAY_SECRET_KEYS",
@@ -152,6 +154,8 @@ pub fn spawn_gateway_mode1(
         .arg("--log-level")
         .arg("info")
         .env("UNRELATED_GATEWAY_SESSION_SECRET", session_secret)
+        // Integration tests run mock upstreams on loopback.
+        .env("UNRELATED_GATEWAY_OUTBOUND_ALLOW_PRIVATE_NETWORKS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(admin_token) = admin_token {

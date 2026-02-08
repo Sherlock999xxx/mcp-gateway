@@ -765,6 +765,18 @@ async fn put_upstream(
         })
         .collect();
 
+    // Outbound safety (SSRF hardening): validate upstream endpoints before storing them.
+    let safety = crate::outbound_safety::gateway_outbound_http_safety();
+    for ep in &endpoints {
+        if let Err(e) = crate::outbound_safety::check_url_allowed(&safety, &ep.url).await {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("upstream endpoint '{}' blocked by outbound safety: {e}", ep.id),
+            )
+                .into_response();
+        }
+    }
+
     if let Err(e) = store.put_upstream(&req.id, req.enabled, &endpoints).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }

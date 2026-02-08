@@ -134,7 +134,14 @@ async fn run(args: CliArgs) -> anyhow::Result<()> {
 
     audit_retention::spawn_audit_retention_task(pg_pool.clone(), ct.clone());
 
-    let http = reqwest::Client::default();
+    // Upstream MCP proxy client.
+    //
+    // Redirects are disabled (SSRF hardening). Upstream endpoints should be configured with their
+    // final URL.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build upstream HTTP client")?;
     // OIDC discovery/JWKS fetch should never follow redirects (SSRF hardening).
     let oidc_http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())

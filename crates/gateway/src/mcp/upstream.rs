@@ -22,6 +22,12 @@ pub(super) async fn upstream_initialize(
     init_message: &ClientJsonRpcMessage,
     headers: &reqwest::header::HeaderMap,
 ) -> anyhow::Result<String> {
+    // Outbound safety (SSRF hardening): validate the upstream endpoint before connecting.
+    let safety = crate::outbound_safety::gateway_outbound_http_safety();
+    if let Err(err) = crate::outbound_safety::check_url_allowed(&safety, mcp_url).await {
+        anyhow::bail!("upstream endpoint blocked by outbound safety policy: {err}");
+    }
+
     let resp = streamable_http::post_message(
         http,
         mcp_url.to_string().into(),
@@ -255,7 +261,19 @@ pub(super) async fn resolve_endpoint_url(
     };
 
     let mut endpoints: HashMap<String, crate::endpoint_cache::UpstreamEndpoint> = HashMap::new();
+    let safety = crate::outbound_safety::gateway_outbound_http_safety();
     for e in upstream.endpoints {
+        if let Err(err) = crate::outbound_safety::check_url_allowed(&safety, &e.url).await {
+            // Block unsafe endpoints (SSRF hardening). Avoid logging full URLs (may contain
+            // sensitive query auth in some deployments).
+            tracing::warn!(
+                upstream_id = %binding.upstream,
+                endpoint_id = %e.id,
+                error = %err,
+                "upstream endpoint blocked by outbound safety policy"
+            );
+            continue;
+        }
         endpoints.insert(
             e.id,
             crate::endpoint_cache::UpstreamEndpoint {

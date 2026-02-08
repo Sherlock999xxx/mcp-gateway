@@ -457,7 +457,9 @@ async fn initialize_profile_sources(
         for i in 0..upstream.endpoints.len() {
             let ep = &upstream.endpoints[(start + i) % upstream.endpoints.len()];
             let headers = upstream::build_upstream_headers(ep.auth.as_ref(), hop + 1);
-            match upstream_initialize(&state.http, &ep.url, &upstream_init_message, &headers).await
+            let endpoint_url = upstream::apply_query_auth(&ep.url, ep.auth.as_ref());
+            match upstream_initialize(&state.http, &endpoint_url, &upstream_init_message, &headers)
+                .await
             {
                 Ok(session_id) => {
                     initialized = Some((ep.id.clone(), session_id));

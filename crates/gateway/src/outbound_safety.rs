@@ -33,6 +33,13 @@ fn env_csv_set(name: &str) -> Option<HashSet<String>> {
 pub fn gateway_outbound_http_safety() -> OutboundHttpSafety {
     let mut safety = OutboundHttpSafety::gateway_default();
 
+    // Unit tests commonly spin up mock services on loopback. Allow private networks in tests so
+    // outbound safety hardening does not break local test servers.
+    #[cfg(test)]
+    {
+        safety.allow_private_networks = true;
+    }
+
     if env_flag("UNRELATED_GATEWAY_OUTBOUND_ALLOW_PRIVATE_NETWORKS") {
         safety.allow_private_networks = true;
     }
@@ -42,4 +49,17 @@ pub fn gateway_outbound_http_safety() -> OutboundHttpSafety {
     }
 
     safety
+}
+
+/// Validate a URL against the provided outbound safety policy.
+///
+/// This is a small helper wrapper around `OutboundHttpSafety::check_url` so call sites can share
+/// consistent parsing + error strings.
+pub async fn check_url_allowed(safety: &OutboundHttpSafety, url: &str) -> Result<(), String> {
+    let u = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    safety
+        .check_url(&u)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
