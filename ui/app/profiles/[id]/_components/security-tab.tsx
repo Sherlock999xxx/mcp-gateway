@@ -396,18 +396,16 @@ function PolicyEditor({
         {policy.clientCapabilitiesMode === "allowlist" ? (
           <div className="space-y-2">
             <div className="text-xs font-medium text-zinc-400">Allow capability keys</div>
-            <div className="flex flex-wrap gap-3">
+            <div className="space-y-2">
               {["sampling", "roots", "elicitation"].map((k) => (
-                <label key={k} className="inline-flex items-center gap-2 text-sm text-zinc-300">
-                  <input
-                    type="checkbox"
-                    className="accent-violet-500"
-                    disabled={disabled}
+                <div key={k} className="flex items-center justify-between gap-4">
+                  <div className="min-w-0 font-mono text-xs text-zinc-300 break-all">{k}</div>
+                  <Toggle
                     checked={policy.clientCapabilitiesAllow.includes(k)}
-                    onChange={(e) => setCapsKey(k, e.target.checked)}
+                    disabled={disabled}
+                    onChange={(checked) => setCapsKey(k, checked)}
                   />
-                  <span className="font-mono text-xs">{k}</span>
-                </label>
+                </div>
               ))}
             </div>
           </div>
