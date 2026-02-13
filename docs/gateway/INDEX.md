@@ -49,7 +49,7 @@ The Adapter stays “dumb plumbing” on purpose: it turns systems into MCP and 
 - No server-side session token revocation list (rely on TTL + re-initialize).
 - Audit event detail levels are still evolving (the current implementation stores safe, structured metadata by default).
 - Fine-grained allow/deny for **resources/prompts** is not implemented yet (tools have allowlisting + `tools/call` limits).
-- Tasks (SEP-1686) are not proxied end-to-end yet (blocked on published RMCP support beyond `rmcp 0.12.0`).
+- Tasks (SEP-1686) are not proxied end-to-end yet (SDK support exists in `rmcp 0.15.x`; gateway/adapter task proxying remains pending).
 - `notifications/roots/list_changed` is not forwarded yet (RMCP type exposure gap).
 
 ## What will NOT live here

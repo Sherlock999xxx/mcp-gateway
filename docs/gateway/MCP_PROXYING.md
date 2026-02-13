@@ -122,5 +122,5 @@ For other non-UTF8 binary bodies, tool execution safely returns a base64-wrapped
 
 ## Limitations
 
-- Tasks (SEP-1686) are not proxied end-to-end yet (blocked on a newer published RMCP than crates.io `rmcp 0.12.0`).
+- Tasks (SEP-1686) are not proxied end-to-end yet (SDK support exists in `rmcp 0.15.x`; gateway/adapter task proxying remains pending).
 - `notifications/roots/list_changed` is not forwarded yet (RMCP type exposure gap).
