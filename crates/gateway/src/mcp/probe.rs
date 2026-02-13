@@ -26,10 +26,11 @@ fn format_anyhow_chain(e: &anyhow::Error) -> String {
 
 fn minimal_initialize_message() -> ClientJsonRpcMessage {
     use rmcp::model::{
-        ClientCapabilities, Implementation, InitializeRequest, InitializeRequestParam,
+        ClientCapabilities, Implementation, InitializeRequest, InitializeRequestParams,
     };
 
-    let init = InitializeRequest::new(InitializeRequestParam {
+    let init = InitializeRequest::new(InitializeRequestParams {
+        meta: None,
         protocol_version: rmcp::model::ProtocolVersion::default(),
         capabilities: ClientCapabilities::default(),
         client_info: Implementation::from_build_env(),

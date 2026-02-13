@@ -27,6 +27,7 @@ use crate::supervisor::StdioBackendSettings;
 use clap::Parser;
 use rmcp::model::AnnotateAble;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
+use std::io::{IsTerminal as _, stdout};
 use std::net::SocketAddr;
 use std::sync::{Arc, atomic::AtomicU64};
 use std::time::{Duration, Instant};
@@ -199,6 +200,7 @@ fn build_streamable_http_service(
         StreamableHttpServerConfig {
             stateful_mode: true,
             sse_keep_alive: Some(Duration::from_secs(15)),
+            sse_retry: None,
             cancellation_token: ct.child_token(),
         },
     )
@@ -402,7 +404,7 @@ fn init_logging(log_level: &str) {
     let env_filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Check if stdout is a TTY for format selection
-    let is_tty = atty::is(atty::Stream::Stdout);
+    let is_tty = stdout().is_terminal();
 
     if is_tty {
         // Human-readable format for development

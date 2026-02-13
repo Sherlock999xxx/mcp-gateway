@@ -2,6 +2,7 @@ use anyhow::Context as _;
 use axum::{Json, Router, extract::State, routing::get};
 use clap::Parser;
 use serde::Serialize;
+use std::io::{IsTerminal as _, stdout};
 use std::time::Duration;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -631,7 +632,7 @@ fn init_logging(log_level: &str) {
     let env_filter = EnvFilter::try_new(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Check if stdout is a TTY for format selection.
-    let is_tty = atty::is(atty::Stream::Stdout);
+    let is_tty = stdout().is_terminal();
 
     if is_tty {
         tracing_subscriber::registry()

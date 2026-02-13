@@ -25,11 +25,11 @@ use base64::Engine as _;
 use futures::{Stream, StreamExt};
 use rmcp::{
     model::{
-        CallToolRequestParam, ClientJsonRpcMessage, ClientNotification, ClientRequest, ErrorCode,
-        ErrorData, GetPromptRequestParam, InitializeResult, JsonRpcError, JsonRpcNotification,
-        JsonRpcRequest, JsonRpcResponse, JsonRpcVersion2_0, ReadResourceRequestParam, Reference,
+        CallToolRequestParams, ClientJsonRpcMessage, ClientNotification, ClientRequest, ErrorCode,
+        ErrorData, GetPromptRequestParams, InitializeResult, JsonRpcError, JsonRpcNotification,
+        JsonRpcRequest, JsonRpcResponse, JsonRpcVersion2_0, ReadResourceRequestParams, Reference,
         RequestId, ServerCapabilities, ServerJsonRpcMessage, ServerNotification, ServerResult,
-        SubscribeRequestParam, UnsubscribeRequestParam,
+        SubscribeRequestParams, UnsubscribeRequestParams,
     },
     transport::common::http_header::{
         EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID, HEADER_SESSION_ID, JSON_MIME_TYPE,
@@ -1547,6 +1547,9 @@ fn server_notification_method(notification: &ServerNotification) -> &str {
         ServerNotification::PromptListChangedNotification(_) => {
             "notifications/prompts/list_changed"
         }
+        ServerNotification::ElicitationCompletionNotification(_) => {
+            "notifications/elicitation/complete"
+        }
         ServerNotification::CustomNotification(n) => n.method.as_str(),
     }
 }
@@ -2285,7 +2288,7 @@ fn extract_call_tool(
     ))
 }
 
-fn as_call_tool_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut CallToolRequestParam> {
+fn as_call_tool_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut CallToolRequestParams> {
     let ClientJsonRpcMessage::Request(JsonRpcRequest { request, .. }) = message else {
         return None;
     };
@@ -2317,7 +2320,7 @@ fn extract_subscribe(message: &ClientJsonRpcMessage) -> Option<(String, rmcp::mo
     Some((req.params.uri.clone(), id.clone()))
 }
 
-fn as_subscribe_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut SubscribeRequestParam> {
+fn as_subscribe_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut SubscribeRequestParams> {
     let ClientJsonRpcMessage::Request(JsonRpcRequest { request, .. }) = message else {
         return None;
     };
@@ -2337,7 +2340,7 @@ fn extract_unsubscribe(message: &ClientJsonRpcMessage) -> Option<(String, rmcp::
     Some((req.params.uri.clone(), id.clone()))
 }
 
-fn as_unsubscribe_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut UnsubscribeRequestParam> {
+fn as_unsubscribe_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut UnsubscribeRequestParams> {
     let ClientJsonRpcMessage::Request(JsonRpcRequest { request, .. }) = message else {
         return None;
     };
@@ -2349,7 +2352,7 @@ fn as_unsubscribe_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut Unsubsc
 
 fn as_read_resource_mut(
     message: &mut ClientJsonRpcMessage,
-) -> Option<&mut ReadResourceRequestParam> {
+) -> Option<&mut ReadResourceRequestParams> {
     let ClientJsonRpcMessage::Request(JsonRpcRequest { request, .. }) = message else {
         return None;
     };
@@ -2369,7 +2372,7 @@ fn extract_get_prompt(message: &ClientJsonRpcMessage) -> Option<(String, rmcp::m
     Some((req.params.name.clone(), id.clone()))
 }
 
-fn as_get_prompt_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut GetPromptRequestParam> {
+fn as_get_prompt_mut(message: &mut ClientJsonRpcMessage) -> Option<&mut GetPromptRequestParams> {
     let ClientJsonRpcMessage::Request(JsonRpcRequest { request, .. }) = message else {
         return None;
     };
@@ -2391,7 +2394,7 @@ fn extract_complete(message: &ClientJsonRpcMessage) -> Option<(Reference, rmcp::
 
 fn as_complete_mut(
     message: &mut ClientJsonRpcMessage,
-) -> Option<&mut rmcp::model::CompleteRequestParam> {
+) -> Option<&mut rmcp::model::CompleteRequestParams> {
     let ClientJsonRpcMessage::Request(JsonRpcRequest { request, .. }) = message else {
         return None;
     };
@@ -2548,7 +2551,7 @@ mod tests {
         routing::{get, post},
     };
     use rmcp::model::{
-        ClientCapabilities, Implementation, InitializeRequest, InitializeRequestParam,
+        ClientCapabilities, Implementation, InitializeRequest, InitializeRequestParams,
     };
     use std::borrow::Cow;
     use std::collections::{HashMap, HashSet};
@@ -2600,7 +2603,8 @@ mod tests {
         }))
         .expect("valid client capabilities");
 
-        let init = InitializeRequest::new(InitializeRequestParam {
+        let init = InitializeRequest::new(InitializeRequestParams {
+            meta: None,
             protocol_version: rmcp::model::ProtocolVersion::default(),
             capabilities: caps,
             client_info: Implementation {
@@ -3273,7 +3277,8 @@ mod tests {
             mcp: crate::store::McpProfileSettings::default(),
         };
 
-        let init = InitializeRequest::new(InitializeRequestParam {
+        let init = InitializeRequest::new(InitializeRequestParams {
+            meta: None,
             protocol_version: rmcp::model::ProtocolVersion::default(),
             capabilities: ClientCapabilities::default(),
             client_info: Implementation::from_build_env(),
@@ -3644,7 +3649,8 @@ sharedSources:
             mcp: crate::store::McpProfileSettings::default(),
         };
 
-        let init = InitializeRequest::new(InitializeRequestParam {
+        let init = InitializeRequest::new(InitializeRequestParams {
+            meta: None,
             protocol_version: rmcp::model::ProtocolVersion::default(),
             capabilities: ClientCapabilities::default(),
             client_info: Implementation::from_build_env(),
@@ -3995,9 +4001,11 @@ sharedSources:
             jsonrpc: JsonRpcVersion2_0,
             id: rmcp::model::RequestId::Number(1),
             request: ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
-                CallToolRequestParam {
+                CallToolRequestParams {
                     name: Cow::Owned("foo".to_string()),
                     arguments: None,
+                    meta: None,
+                    task: None,
                 },
             )),
         });
