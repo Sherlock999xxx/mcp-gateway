@@ -59,6 +59,24 @@ Gateway defaults are intentionally strict:
 - redirects: **not followed** (gateway-native HTTP/OpenAPI tools and upstream MCP proxying)
 - max response body: **1 MiB** (gateway-native HTTP/OpenAPI tool sources only)
 
+## HTTPS requirement for upstream MCP endpoints (scheme policy)
+
+For upstream MCP endpoint URLs (Streamable HTTP), the Gateway prefers **TLS by default**:
+
+- upstream endpoint URLs must use **`https://`**
+- `http://` is rejected unless an explicit dev override is set:
+  - `UNRELATED_GATEWAY_UPSTREAM_ALLOW_HTTP=1`
+
+This is enforced both:
+
+- when upstream endpoints are created/updated (validation), and
+- at connect-time (second line of defense).
+
+Notes:
+
+- This is **separate** from the private-network SSRF override. Even with HTTPS, private IP ranges are still blocked unless `UNRELATED_GATEWAY_OUTBOUND_ALLOW_PRIVATE_NETWORKS=1` is set.
+- Today, this HTTPS scheme policy applies to **upstream MCP endpoints** only (not to gateway-native HTTP/OpenAPI tool sources).
+
 ## Scope / what this does *not* cover
 
 This policy applies to:

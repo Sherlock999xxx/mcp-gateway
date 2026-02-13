@@ -107,6 +107,39 @@ Examples of request methods:
 - `roots/list`
 - `elicitation/create`
 
+### `mcp.security.transportLimits` (DoS hardening)
+
+The Gateway enforces **payload size** and optional **JSON complexity** limits to reduce DoS risk from oversized or adversarial messages.
+
+Where limits apply:
+
+- **Downstream POST bodies**: `POST /{profile_id}/mcp` (client → gateway)
+- **SSE event payloads**: each SSE `data:` payload (upstream → gateway → downstream)
+
+Shape (`camelCase`):
+
+- `maxPostBodyBytes` (bytes; default: 4 MiB; hard max: 32 MiB)
+- `maxSseEventBytes` (bytes; default: 8 MiB; hard max: 32 MiB)
+- `maxJsonDepth` (optional; hard max: 512)
+- `maxJsonArrayLen` (optional; hard max: 1_000_000)
+- `maxJsonObjectKeys` (optional; hard max: 1_000_000)
+- `maxJsonStringBytes` (optional; hard max: 32 MiB)
+
+Precedence:
+
+1. Per-profile `mcp.security.transportLimits`
+2. Mode 3 tenant defaults (`GET|PUT /tenant/v1/transport/limits`, also exposed in the Web UI under **Settings**)
+3. Process defaults (safe built-ins), bounded by hard caps
+
+Mode 1 note: there are no tenant-level defaults; configure per profile.
+
+When limits are exceeded:
+
+- downstream requests are rejected, and
+- upstream SSE streams are closed (dropping a single oversized event risks downstream desync)
+
+In Mode 3, these incidents are also audit-logged as `mcp.payload_limit_exceeded` (see [`docs/gateway/AUDIT.md`](AUDIT.md)).
+
 ## Mode 1 example
 
 ```yaml
