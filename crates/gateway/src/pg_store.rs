@@ -2242,6 +2242,14 @@ where id = $1
         if res.rows_affected() == 0 {
             anyhow::bail!("tenant not found");
         }
+        // Best-effort HA invalidation for per-tenant audit settings cache.
+        let _ = pg_invalidation::publish(
+            &self.pool,
+            &pg_invalidation::InvalidationEvent::TenantAuditSettings {
+                tenant_id: tenant_id.to_string(),
+            },
+        )
+        .await;
         Ok(())
     }
 

@@ -270,10 +270,14 @@ async fn start_mode3_ha_tasks(
     let tools_cache = mcp_state.tools_cache.clone();
     let endpoint_cache = mcp_state.endpoint_cache.clone();
     let tenant_catalog = mcp_state.tenant_catalog.clone();
+    let audit = mcp_state.audit.clone();
     let on_event: std::sync::Arc<dyn Fn(pg_invalidation::InvalidationEvent) + Send + Sync> =
         std::sync::Arc::new(move |evt| match evt {
             pg_invalidation::InvalidationEvent::TenantSecret { tenant_id, .. } => {
                 tenant_catalog.invalidate_tenant(&tenant_id);
+            }
+            pg_invalidation::InvalidationEvent::TenantAuditSettings { tenant_id } => {
+                audit.invalidate_tenant_settings_cache(&tenant_id);
             }
             pg_invalidation::InvalidationEvent::TenantToolSource {
                 tenant_id,

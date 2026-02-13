@@ -2458,39 +2458,6 @@ where
     resp
 }
 
-fn sse_from_upstream_stream_with_timeout<S>(stream: S, timeout: std::time::Duration) -> Response
-where
-    S: Stream<Item = Result<sse_stream::Sse, sse_stream::Error>> + Send + 'static,
-{
-    // Best-effort: cap a single request's SSE response lifetime to avoid hanging forever.
-    let mapped = stream.map(|evt| match evt {
-        Ok(sse) => {
-            let mut ev = axum::response::sse::Event::default();
-            if let Some(id) = sse.id {
-                ev = ev.id(id);
-            }
-            if let Some(data) = sse.data {
-                ev = ev.data(data);
-            }
-            Ok::<_, Infallible>(ev)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "upstream sse error");
-            Ok::<_, Infallible>(axum::response::sse::Event::default().comment("upstream error"))
-        }
-    });
-
-    let deadline = tokio::time::sleep(timeout);
-    let mapped = mapped.take_until(deadline);
-
-    let mut resp = Sse::new(mapped).into_response();
-    resp.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static(EVENT_STREAM_MIME_TYPE),
-    );
-    resp
-}
-
 fn ensure_accepts_post(headers: &HeaderMap) -> Result<(), (StatusCode, &'static str)> {
     let accept = headers
         .get(axum::http::header::ACCEPT)

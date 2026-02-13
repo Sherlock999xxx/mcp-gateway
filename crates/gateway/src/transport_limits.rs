@@ -136,6 +136,49 @@ pub struct JsonComplexityViolation {
     pub limit: u64,
 }
 
+fn walk_json_complexity(
+    v: &Value,
+    depth: u32,
+    max_depth: &mut u32,
+    max_array_len: &mut u32,
+    max_object_keys: &mut u32,
+    max_string_bytes: &mut u64,
+) {
+    *max_depth = (*max_depth).max(depth);
+    match v {
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        Value::String(s) => {
+            *max_string_bytes = (*max_string_bytes).max(s.len() as u64);
+        }
+        Value::Array(xs) => {
+            *max_array_len = (*max_array_len).max(u32::try_from(xs.len()).unwrap_or(u32::MAX));
+            for x in xs {
+                walk_json_complexity(
+                    x,
+                    depth.saturating_add(1),
+                    max_depth,
+                    max_array_len,
+                    max_object_keys,
+                    max_string_bytes,
+                );
+            }
+        }
+        Value::Object(map) => {
+            *max_object_keys = (*max_object_keys).max(u32::try_from(map.len()).unwrap_or(u32::MAX));
+            for (_k, x) in map {
+                walk_json_complexity(
+                    x,
+                    depth.saturating_add(1),
+                    max_depth,
+                    max_array_len,
+                    max_object_keys,
+                    max_string_bytes,
+                );
+            }
+        }
+    }
+}
+
 pub fn check_json_complexity(
     v: &Value,
     limits: EffectiveTransportLimits,
@@ -144,56 +187,12 @@ pub fn check_json_complexity(
         return None;
     }
 
-    fn walk(
-        v: &Value,
-        depth: u32,
-        max_depth: &mut u32,
-        max_array_len: &mut u32,
-        max_object_keys: &mut u32,
-        max_string_bytes: &mut u64,
-    ) {
-        *max_depth = (*max_depth).max(depth);
-        match v {
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
-            Value::String(s) => {
-                *max_string_bytes = (*max_string_bytes).max(s.len() as u64);
-            }
-            Value::Array(xs) => {
-                *max_array_len = (*max_array_len).max(u32::try_from(xs.len()).unwrap_or(u32::MAX));
-                for x in xs {
-                    walk(
-                        x,
-                        depth.saturating_add(1),
-                        max_depth,
-                        max_array_len,
-                        max_object_keys,
-                        max_string_bytes,
-                    );
-                }
-            }
-            Value::Object(map) => {
-                *max_object_keys =
-                    (*max_object_keys).max(u32::try_from(map.len()).unwrap_or(u32::MAX));
-                for (_k, x) in map {
-                    walk(
-                        x,
-                        depth.saturating_add(1),
-                        max_depth,
-                        max_array_len,
-                        max_object_keys,
-                        max_string_bytes,
-                    );
-                }
-            }
-        }
-    }
-
     let mut max_depth: u32 = 0;
     let mut max_array_len: u32 = 0;
     let mut max_object_keys: u32 = 0;
     let mut max_string_bytes: u64 = 0;
 
-    walk(
+    walk_json_complexity(
         v,
         1,
         &mut max_depth,
@@ -303,7 +302,10 @@ mod tests {
         assert_eq!(limits.max_json_depth, Some(1));
         assert_eq!(limits.max_json_array_len, Some(HARD_MAX_JSON_ARRAY_LEN));
         assert_eq!(limits.max_json_object_keys, Some(HARD_MAX_JSON_OBJECT_KEYS));
-        assert_eq!(limits.max_json_string_bytes, Some(HARD_MAX_JSON_STRING_BYTES));
+        assert_eq!(
+            limits.max_json_string_bytes,
+            Some(HARD_MAX_JSON_STRING_BYTES)
+        );
     }
 
     #[test]

@@ -182,6 +182,11 @@ pub trait AuditSink: Send + Sync {
     /// Returns `AuditLevel::Off` when audit is disabled for the tenant or when the setting cannot
     /// be loaded.
     async fn tenant_default_level(&self, tenant_id: &str) -> AuditLevel;
+
+    /// Best-effort cache invalidation hook for tenant audit settings.
+    ///
+    /// Implementations without in-memory tenant-level caches can ignore this.
+    fn invalidate_tenant_settings_cache(&self, _tenant_id: &str) {}
 }
 
 #[derive(Default)]
@@ -390,6 +395,10 @@ impl AuditSink for PostgresAuditSink {
     async fn tenant_default_level(&self, tenant_id: &str) -> AuditLevel {
         let (enabled, level) = self.tenant_audit_settings(tenant_id).await;
         if enabled { level } else { AuditLevel::Off }
+    }
+
+    fn invalidate_tenant_settings_cache(&self, tenant_id: &str) {
+        self.tenant_cache.write().remove(tenant_id);
     }
 }
 

@@ -3040,7 +3040,11 @@ async fn put_audit_settings(
     };
 
     match store.put_tenant_audit_settings(&tenant_id, &settings).await {
-        Ok(()) => Json(OkResponse { ok: true }).into_response(),
+        Ok(()) => {
+            // Keep per-tenant audit level cache coherent on this node.
+            state.audit.invalidate_tenant_settings_cache(&tenant_id);
+            Json(OkResponse { ok: true }).into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
             (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()

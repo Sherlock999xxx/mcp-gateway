@@ -2447,12 +2447,15 @@ async fn put_tenant_audit_settings(
 
     let (status, ok, error, resp) =
         match store.put_tenant_audit_settings(&tenant_id, &settings).await {
-            Ok(()) => (
-                StatusCode::OK,
-                true,
-                None,
-                Json(OkResponse { ok: true }).into_response(),
-            ),
+            Ok(()) => {
+                state.audit.invalidate_tenant_settings_cache(&tenant_id);
+                (
+                    StatusCode::OK,
+                    true,
+                    None,
+                    Json(OkResponse { ok: true }).into_response(),
+                )
+            }
             Err(e) => {
                 let msg = e.to_string();
                 (
